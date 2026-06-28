@@ -60,9 +60,6 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 {
-		return nil, E.New("missing tags")
-	}
 	return outbound, nil
 }
 
@@ -106,13 +103,18 @@ func (s *Selector) Start() error {
 		return nil
 	}
 
-	s.selected.Store(s.outbounds[s.tags[0]])
+	if len(s.tags) > 0 {
+		s.selected.Store(s.outbounds[s.tags[0]])
+	}
 	return nil
 }
 
 func (s *Selector) Now() string {
 	selected := s.selected.Load()
 	if selected == nil {
+		if len(s.tags) == 0 {
+			return ""
+		}
 		return s.tags[0]
 	}
 	return selected.Tag()
@@ -147,7 +149,11 @@ func (s *Selector) SelectOutbound(tag string) bool {
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
+	selected := s.selected.Load()
+	if selected == nil {
+		return nil, E.New("missing selected outbound")
+	}
+	conn, err := selected.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +161,11 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
+	selected := s.selected.Load()
+	if selected == nil {
+		return nil, E.New("missing selected outbound")
+	}
+	conn, err := selected.ListenPacket(ctx, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +175,10 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
 	selected := s.selected.Load()
+	if selected == nil {
+		N.CloseOnHandshakeFailure(conn, onClose, E.New("missing selected outbound"))
+		return
+	}
 	if outboundHandler, isHandler := selected.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -175,6 +189,10 @@ func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata ad
 func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
 	selected := s.selected.Load()
+	if selected == nil {
+		N.CloseOnHandshakeFailure(conn, onClose, E.New("missing selected outbound"))
+		return
+	}
 	if outboundHandler, isHandler := selected.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -184,6 +202,9 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 
 func (s *Selector) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
 	selected := s.selected.Load()
+	if selected == nil {
+		return nil, E.New("missing selected outbound")
+	}
 	if !common.Contains(selected.Network(), metadata.Network) {
 		return nil, E.New(metadata.Network, " is not supported by outbound: ", selected.Tag())
 	}

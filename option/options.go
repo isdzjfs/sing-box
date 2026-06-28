@@ -10,21 +10,23 @@ import (
 )
 
 type _Options struct {
-	RawMessage           json.RawMessage       `json:"-"`
-	CommentsSet          *json.CommentSet      `json:"-"`
-	Schema               string                `json:"$schema,omitempty"`
-	Log                  *LogOptions           `json:"log,omitempty"`
-	DNS                  *DNSOptions           `json:"dns,omitempty"`
-	NTP                  *NTPOptions           `json:"ntp,omitempty"`
-	Certificate          *CertificateOptions   `json:"certificate,omitempty"`
-	CertificateProviders []CertificateProvider `json:"certificate_providers,omitempty"`
-	HTTPClients          []HTTPClient          `json:"http_clients,omitempty"`
-	Endpoints            []Endpoint            `json:"endpoints,omitempty"`
-	Inbounds             []Inbound             `json:"inbounds,omitempty"`
-	Outbounds            []Outbound            `json:"outbounds,omitempty"`
-	Route                *RouteOptions         `json:"route,omitempty"`
-	Services             []Service             `json:"services,omitempty"`
-	Experimental         *ExperimentalOptions  `json:"experimental,omitempty"`
+	RawMessage            json.RawMessage       `json:"-"`
+	CommentsSet           *json.CommentSet      `json:"-"`
+	Schema                string                `json:"$schema,omitempty"`
+	Log                   *LogOptions           `json:"log,omitempty"`
+	DNS                   *DNSOptions           `json:"dns,omitempty"`
+	NTP                   *NTPOptions           `json:"ntp,omitempty"`
+	Certificate           *CertificateOptions   `json:"certificate,omitempty"`
+	CertificateProviders  []CertificateProvider `json:"certificate_providers,omitempty"`
+	HTTPClients           []HTTPClient          `json:"http_clients,omitempty"`
+	ProxyProviderDefaults *ProxyProvider        `json:"proxy-provider-defaults,omitempty"`
+	ProxyProviders        ProxyProviderMap      `json:"proxy-providers,omitempty"`
+	Endpoints             []Endpoint            `json:"endpoints,omitempty"`
+	Inbounds              []Inbound             `json:"inbounds,omitempty"`
+	Outbounds             []Outbound            `json:"outbounds,omitempty"`
+	Route                 *RouteOptions         `json:"route,omitempty"`
+	Services              []Service             `json:"services,omitempty"`
+	Experimental          *ExperimentalOptions  `json:"experimental,omitempty"`
 }
 
 type Options _Options
