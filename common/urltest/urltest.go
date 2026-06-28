@@ -18,16 +18,18 @@ import (
 )
 
 type HistoryStorage struct {
-	access       sync.RWMutex
-	delayHistory map[string][]*adapter.URLTestHistory
-	updateHooks  []*observable.Subscriber[struct{}]
+	access         sync.RWMutex
+	currentHistory map[string]*adapter.URLTestHistory
+	delayHistory   map[string][]*adapter.URLTestHistory
+	updateHooks    []*observable.Subscriber[struct{}]
 }
 
 const maxHistoryEntries = 20
 
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
-		delayHistory: make(map[string][]*adapter.URLTestHistory),
+		currentHistory: make(map[string]*adapter.URLTestHistory),
+		delayHistory:   make(map[string][]*adapter.URLTestHistory),
 	}
 }
 
@@ -49,11 +51,7 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	histories := s.delayHistory[tag]
-	if len(histories) == 0 {
-		return nil
-	}
-	return histories[len(histories)-1]
+	return s.currentHistory[tag]
 }
 
 func (s *HistoryStorage) LoadURLTestHistories(tag string) []*adapter.URLTestHistory {
@@ -69,20 +67,40 @@ func (s *HistoryStorage) LoadURLTestHistories(tag string) []*adapter.URLTestHist
 	return append([]*adapter.URLTestHistory(nil), histories...)
 }
 
+func (s *HistoryStorage) appendHistoryLocked(tag string, history *adapter.URLTestHistory) {
+	histories := append(s.delayHistory[tag], history)
+	if len(histories) > maxHistoryEntries {
+		histories = append([]*adapter.URLTestHistory(nil), histories[len(histories)-maxHistoryEntries:]...)
+	}
+	s.delayHistory[tag] = histories
+}
+
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 	s.access.Lock()
-	delete(s.delayHistory, tag)
+	// Keep visible delay history intact; only remove the current selectable result.
+	delete(s.currentHistory, tag)
+	s.notifyUpdated()
+	s.access.Unlock()
+}
+
+func (s *HistoryStorage) StoreURLTestFailure(tag string, checkedAt time.Time) {
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	s.access.Lock()
+	delete(s.currentHistory, tag)
+	s.appendHistoryLocked(tag, &adapter.URLTestHistory{
+		Time:  checkedAt,
+		Delay: 0,
+	})
 	s.notifyUpdated()
 	s.access.Unlock()
 }
 
 func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
-	histories := append(s.delayHistory[tag], history)
-	if len(histories) > maxHistoryEntries {
-		histories = append([]*adapter.URLTestHistory(nil), histories[len(histories)-maxHistoryEntries:]...)
-	}
-	s.delayHistory[tag] = histories
+	s.currentHistory[tag] = history
+	s.appendHistoryLocked(tag, history)
 	s.notifyUpdated()
 	s.access.Unlock()
 }

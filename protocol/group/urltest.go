@@ -393,7 +393,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.T
 			t, err := urltest.URLTest(testCtx, g.link, p)
 			if err != nil {
 				g.logger.Debug("outbound ", tag, " unavailable: ", err)
-				g.history.DeleteURLTestHistory(realTag)
+				g.history.StoreURLTestFailure(realTag, checkedAt)
 			} else {
 				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
 				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
