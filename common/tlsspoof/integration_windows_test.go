@@ -4,19 +4,29 @@ package tlsspoof
 
 import (
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 )
 
 func newSpoofer(t *testing.T, conn net.Conn, method Method) rawSpoofer {
 	t.Helper()
 	s, err := newRawSpoofer(conn, method)
+	skipIfWinDivertUnavailable(t, err)
 	require.NoError(t, err)
 	return s
+}
+
+func skipIfWinDivertUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Skipf("WinDivert integration test requires Administrator privileges: %v", err)
+	}
 }
 
 // Basic lifecycle: opening a spoofer against a live TCP conn installs
@@ -72,6 +82,7 @@ func TestIntegrationConnInjectsThenForwardsRealCH(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 
 	wrapped, err := NewConn(client, MethodWrongSequence, "letsencrypt.org")
+	skipIfWinDivertUnavailable(t, err)
 	require.NoError(t, err)
 
 	payload, err := hex.DecodeString(realClientHello)

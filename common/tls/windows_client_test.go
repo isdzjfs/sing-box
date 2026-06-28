@@ -9,6 +9,7 @@ import (
 	stdtls "crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/common/logger"
 	N "github.com/sagernet/sing/common/network"
+	"golang.org/x/sys/windows"
 )
 
 const windowsTLSTestTimeout = 5 * time.Second
@@ -283,6 +285,23 @@ type windowsOpaqueConn struct {
 	net.Conn
 }
 
+var windowsTLS13Support = sync.OnceValues(func() (bool, string) {
+	major, _, build := windows.RtlGetNtVersionNumbers()
+	build &= 0xffff
+	if major < 10 || build < 20348 {
+		return false, fmt.Sprintf("Schannel TLS 1.3 is not available by default on Windows build %d", build)
+	}
+	return true, ""
+})
+
+func skipIfWindowsTLS13Unavailable(t *testing.T) {
+	t.Helper()
+	supported, reason := windowsTLS13Support()
+	if !supported {
+		t.Skip(reason)
+	}
+}
+
 func TestWindowsClientHandshakeTLS12(t *testing.T) {
 	serverCertificate, serverCertificatePEM := newWindowsTestCertificate(t, "localhost")
 	serverResult, serverAddress := startWindowsTLSTestServer(t, &stdtls.Config{
@@ -378,6 +397,7 @@ func TestWindowsClientHandshakeWrappedConn(t *testing.T) {
 }
 
 func TestWindowsClientHandshakeTLS13(t *testing.T) {
+	skipIfWindowsTLS13Unavailable(t)
 	serverCertificate, serverCertificatePEM := newWindowsTestCertificate(t, "localhost")
 	serverResult, serverAddress := startWindowsTLSTestServer(t, &stdtls.Config{
 		Certificates: []stdtls.Certificate{serverCertificate},
@@ -743,6 +763,7 @@ func TestWindowsClientRoundtrip(t *testing.T) {
 }
 
 func TestWindowsClientRoundtripTLS13(t *testing.T) {
+	skipIfWindowsTLS13Unavailable(t)
 	clientConn, serverDone := startWindowsEchoServer(t, stdtls.VersionTLS13)
 	defer clientConn.Close()
 
@@ -868,6 +889,7 @@ func TestWindowsClientCreateReadWaiterFallback(t *testing.T) {
 }
 
 func TestWindowsClientTLS13PostHandshakeConcurrentWrite(t *testing.T) {
+	skipIfWindowsTLS13Unavailable(t)
 	serverCertificate, serverCertificatePEM := newWindowsTestCertificate(t, "localhost")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -15,8 +15,16 @@ import (
 func openHandle(t *testing.T, filter *Filter, flags Flag) *Handle {
 	t.Helper()
 	h, err := Open(filter, LayerNetwork, 0, flags)
+	skipIfWinDivertUnavailable(t, err)
 	require.NoError(t, err)
 	return h
+}
+
+func skipIfWinDivertUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Skipf("WinDivert integration test requires Administrator privileges: %v", err)
+	}
 }
 
 // A send-only handle installs+opens the driver but does not attach a
@@ -70,19 +78,23 @@ func TestIntegrationRecvAbortsOnClose(t *testing.T) {
 // Two concurrent Open calls must both succeed: the first wins the driver
 // install race, the second reuses the already-running service.
 func TestIntegrationConcurrentOpen(t *testing.T) {
-	errCh := make(chan error, 2)
-	handles := make(chan *Handle, 2)
+	resultCh := make(chan struct {
+		handle *Handle
+		err    error
+	}, 2)
 	for range 2 {
 		go func() {
 			h, err := Open(nil, LayerNetwork, 0, FlagSendOnly)
-			handles <- h
-			errCh <- err
+			resultCh <- struct {
+				handle *Handle
+				err    error
+			}{h, err}
 		}()
 	}
 	for range 2 {
-		err := <-errCh
-		h := <-handles
-		require.NoError(t, err)
-		require.NoError(t, h.Close())
+		result := <-resultCh
+		skipIfWinDivertUnavailable(t, result.err)
+		require.NoError(t, result.err)
+		require.NoError(t, result.handle.Close())
 	}
 }

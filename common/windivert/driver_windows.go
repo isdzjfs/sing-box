@@ -59,7 +59,7 @@ func installDriver() error {
 	// Serialize driver install across concurrent processes.
 	mutexName, _ := windows.UTF16PtrFromString("WinDivertDriverInstallMutex")
 	mutex, err := windows.CreateMutex(nil, false, mutexName)
-	if err != nil {
+	if err != nil && (mutex == 0 || !errors.Is(err, windows.ERROR_ALREADY_EXISTS)) {
 		return E.Cause(err, "windivert: create install mutex")
 	}
 	defer windows.CloseHandle(mutex)
