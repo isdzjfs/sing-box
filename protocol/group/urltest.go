@@ -327,10 +327,11 @@ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{})
 		g.CheckOutbounds(false)
 	}
 	for {
+		var tickTime time.Time
 		select {
 		case <-closeChan:
 			return
-		case <-ticker.C:
+		case tickTime = <-ticker.C:
 		}
 		if time.Since(g.lastActive.Load()) > g.idleTimeout {
 			g.access.Lock()
@@ -343,22 +344,29 @@ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{})
 			g.access.Unlock()
 			return
 		}
-		g.CheckOutbounds(false)
+		g.checkOutboundsAt(false, tickTime)
 	}
 }
 
 func (g *URLTestGroup) CheckOutbounds(force bool) {
-	_, _ = g.urlTest(g.ctx, force)
+	_, _ = g.urlTest(g.ctx, force, time.Now())
+}
+
+func (g *URLTestGroup) checkOutboundsAt(force bool, checkedAt time.Time) {
+	_, _ = g.urlTest(g.ctx, force, checkedAt)
 }
 
 func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
-	return g.urlTest(ctx, false)
+	return g.urlTest(ctx, false, time.Now())
 }
 
-func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
+func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.Time) (map[string]uint16, error) {
 	result := make(map[string]uint16)
 	if g.checking.Swap(true) {
 		return result, nil
+	}
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
 	}
 	defer g.checking.Store(false)
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
@@ -371,7 +379,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 			continue
 		}
 		history := g.history.LoadURLTestHistory(realTag)
-		if !force && history != nil && time.Since(history.Time) < g.interval {
+		if !force && history != nil && checkedAt.Sub(history.Time) < g.interval {
 			continue
 		}
 		checked[realTag] = true
@@ -389,7 +397,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 			} else {
 				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
 				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
-					Time:  time.Now(),
+					Time:  checkedAt,
 					Delay: t,
 				})
 				resultAccess.Lock()

@@ -70,12 +70,7 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 	info.Put("type", clashType)
 	info.Put("name", detour.Tag())
 	info.Put("udp", common.Contains(detour.Network(), N.NetworkUDP))
-	delayHistory := server.urlTestHistory.LoadURLTestHistory(adapter.OutboundTag(detour))
-	if delayHistory != nil {
-		info.Put("history", []*adapter.URLTestHistory{delayHistory})
-	} else {
-		info.Put("history", []*adapter.URLTestHistory{})
-	}
+	info.Put("history", server.urlTestHistory.LoadURLTestHistories(adapter.OutboundTag(detour)))
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		info.Put("now", group.Now())
 		info.Put("all", group.All())
@@ -202,6 +197,7 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(timeout))
 		defer cancel()
 
+		startTime := time.Now()
 		delay, err := urltest.URLTest(ctx, url, proxy)
 		defer func() {
 			realTag := group.RealTag(proxy)
@@ -209,7 +205,7 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 				server.urlTestHistory.DeleteURLTestHistory(realTag)
 			} else {
 				server.urlTestHistory.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
-					Time:  time.Now(),
+					Time:  startTime,
 					Delay: delay,
 				})
 			}

@@ -105,6 +105,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 					continue
 				}
 				b.Go(realTag, func() (any, error) {
+					startTime := time.Now()
 					t, err := urltest.URLTest(ctx, url, p)
 					if err != nil {
 						server.logger.Debug("outbound ", tag, " unavailable: ", err)
@@ -112,7 +113,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 					} else {
 						server.logger.Debug("outbound ", tag, " available: ", t, "ms")
 						server.urlTestHistory.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
-							Time:  time.Now(),
+							Time:  startTime,
 							Delay: t,
 						})
 						resultAccess.Lock()

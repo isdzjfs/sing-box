@@ -19,13 +19,15 @@ import (
 
 type HistoryStorage struct {
 	access       sync.RWMutex
-	delayHistory map[string]*adapter.URLTestHistory
+	delayHistory map[string][]*adapter.URLTestHistory
 	updateHooks  []*observable.Subscriber[struct{}]
 }
 
+const maxHistoryEntries = 20
+
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
-		delayHistory: make(map[string]*adapter.URLTestHistory),
+		delayHistory: make(map[string][]*adapter.URLTestHistory),
 	}
 }
 
@@ -47,7 +49,24 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	return s.delayHistory[tag]
+	histories := s.delayHistory[tag]
+	if len(histories) == 0 {
+		return nil
+	}
+	return histories[len(histories)-1]
+}
+
+func (s *HistoryStorage) LoadURLTestHistories(tag string) []*adapter.URLTestHistory {
+	if s == nil {
+		return []*adapter.URLTestHistory{}
+	}
+	s.access.RLock()
+	defer s.access.RUnlock()
+	histories := s.delayHistory[tag]
+	if len(histories) == 0 {
+		return []*adapter.URLTestHistory{}
+	}
+	return append([]*adapter.URLTestHistory(nil), histories...)
 }
 
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
@@ -59,7 +78,11 @@ func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 
 func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
-	s.delayHistory[tag] = history
+	histories := append(s.delayHistory[tag], history)
+	if len(histories) > maxHistoryEntries {
+		histories = append([]*adapter.URLTestHistory(nil), histories[len(histories)-maxHistoryEntries:]...)
+	}
+	s.delayHistory[tag] = histories
 	s.notifyUpdated()
 	s.access.Unlock()
 }
