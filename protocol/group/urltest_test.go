@@ -87,6 +87,14 @@ func TestURLTestGroupSkipsSharedOutboundRecentlyCheckedByAnotherGroup(t *testing
 	require.Len(t, histories, 1)
 	require.Equal(t, checkedAt, histories[0].Time)
 	require.Equal(t, uint16(0), histories[0].Delay)
+
+	secondGroup.checkOutboundsAt(false, checkedAt.Add(30*time.Second))
+
+	require.Equal(t, int32(2), outbound.dialCount.Load())
+	histories = history.LoadURLTestHistories("proxy")
+	require.Len(t, histories, 2)
+	require.Equal(t, checkedAt.Add(30*time.Second), histories[1].Time)
+	require.Equal(t, uint16(0), histories[1].Delay)
 }
 
 func newTestURLTestGroup(t *testing.T, interval time.Duration, idleTimeout time.Duration) *URLTestGroup {

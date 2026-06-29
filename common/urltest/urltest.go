@@ -88,7 +88,7 @@ func (s *HistoryStorage) lastHistoryLocked(tag string) *adapter.URLTestHistory {
 	return s.currentHistory[tag]
 }
 
-func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, interval time.Duration, force bool) bool {
+func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, force bool) bool {
 	if s == nil {
 		return true
 	}
@@ -100,7 +100,7 @@ func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, interva
 	if s.checking == nil {
 		s.checking = make(map[string]time.Time)
 	}
-	if checkingAt, loaded := s.checking[tag]; loaded && (interval <= 0 || checkedAt.Sub(checkingAt) < interval) {
+	if _, loaded := s.checking[tag]; loaded {
 		return false
 	}
 	if !force {

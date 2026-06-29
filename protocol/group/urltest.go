@@ -389,7 +389,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.T
 		if !loaded {
 			continue
 		}
-		if !g.history.ReserveURLTest(realTag, checkedAt, g.interval, force) {
+		if !g.history.ReserveURLTest(realTag, checkedAt, force) {
 			continue
 		}
 		b.Go(realTag, func() (any, error) {
