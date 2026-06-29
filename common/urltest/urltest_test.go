@@ -50,3 +50,38 @@ func TestHistoryStorageKeepsRecentEntries(t *testing.T) {
 	require.NotNil(t, latest)
 	require.Equal(t, uint16(27), latest.Delay)
 }
+
+func TestHistoryStorageReserveURLTestSkipsRecentFailure(t *testing.T) {
+	storage := NewHistoryStorage()
+	baseTime := time.Unix(1000, 0)
+
+	storage.StoreURLTestFailure("proxy", baseTime)
+
+	require.False(t, storage.ReserveURLTest("proxy", baseTime.Add(30*time.Second), time.Minute, false))
+	require.True(t, storage.ReserveURLTest("proxy", baseTime.Add(time.Minute), time.Minute, false))
+}
+
+func TestHistoryStorageReserveURLTestDeduplicatesActiveCheck(t *testing.T) {
+	storage := NewHistoryStorage()
+	baseTime := time.Unix(1000, 0)
+
+	require.True(t, storage.ReserveURLTest("proxy", baseTime, time.Minute, false))
+	require.False(t, storage.ReserveURLTest("proxy", baseTime, time.Minute, false))
+	require.False(t, storage.ReserveURLTest("proxy", baseTime, time.Minute, true))
+
+	storage.FinishURLTest("proxy", baseTime)
+	require.True(t, storage.ReserveURLTest("proxy", baseTime, time.Minute, true))
+}
+
+func TestHistoryStorageReserveURLTestForceIgnoresRecentHistory(t *testing.T) {
+	storage := NewHistoryStorage()
+	baseTime := time.Unix(1000, 0)
+
+	storage.StoreURLTestHistory("proxy", &adapter.URLTestHistory{
+		Time:  baseTime,
+		Delay: 100,
+	})
+
+	require.False(t, storage.ReserveURLTest("proxy", baseTime.Add(30*time.Second), time.Minute, false))
+	require.True(t, storage.ReserveURLTest("proxy", baseTime.Add(30*time.Second), time.Minute, true))
+}

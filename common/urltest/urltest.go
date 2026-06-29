@@ -21,6 +21,7 @@ type HistoryStorage struct {
 	access         sync.RWMutex
 	currentHistory map[string]*adapter.URLTestHistory
 	delayHistory   map[string][]*adapter.URLTestHistory
+	checking       map[string]time.Time
 	updateHooks    []*observable.Subscriber[struct{}]
 }
 
@@ -30,6 +31,7 @@ func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
 		currentHistory: make(map[string]*adapter.URLTestHistory),
 		delayHistory:   make(map[string][]*adapter.URLTestHistory),
+		checking:       make(map[string]time.Time),
 	}
 }
 
@@ -75,6 +77,50 @@ func (s *HistoryStorage) appendHistoryLocked(tag string, history *adapter.URLTes
 	s.delayHistory[tag] = histories
 }
 
+func (s *HistoryStorage) lastHistoryLocked(tag string) *adapter.URLTestHistory {
+	histories := s.delayHistory[tag]
+	if len(histories) > 0 {
+		return histories[len(histories)-1]
+	}
+	return s.currentHistory[tag]
+}
+
+func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, interval time.Duration, force bool) bool {
+	if s == nil {
+		return true
+	}
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.checking == nil {
+		s.checking = make(map[string]time.Time)
+	}
+	if checkingAt, loaded := s.checking[tag]; loaded && (interval <= 0 || checkedAt.Sub(checkingAt) < interval) {
+		return false
+	}
+	if !force {
+		history := s.lastHistoryLocked(tag)
+		if history != nil && checkedAt.Sub(history.Time) < interval {
+			return false
+		}
+	}
+	s.checking[tag] = checkedAt
+	return true
+}
+
+func (s *HistoryStorage) FinishURLTest(tag string, checkedAt time.Time) {
+	if s == nil {
+		return
+	}
+	s.access.Lock()
+	defer s.access.Unlock()
+	if checkingAt, loaded := s.checking[tag]; loaded && checkingAt.Equal(checkedAt) {
+		delete(s.checking, tag)
+	}
+}
+
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 	s.access.Lock()
 	// Keep visible delay history intact; only remove the current selectable result.
@@ -114,6 +160,7 @@ func (s *HistoryStorage) notifyUpdated() {
 func (s *HistoryStorage) Close() error {
 	s.access.Lock()
 	defer s.access.Unlock()
+	s.checking = nil
 	s.updateHooks = nil
 	return nil
 }

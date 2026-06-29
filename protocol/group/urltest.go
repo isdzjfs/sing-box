@@ -384,16 +384,16 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.T
 		if checked[realTag] {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(realTag)
-		if !force && history != nil && checkedAt.Sub(history.Time) < g.interval {
-			continue
-		}
 		checked[realTag] = true
 		p, loaded := g.outbound.Outbound(realTag)
 		if !loaded {
 			continue
 		}
+		if !g.history.ReserveURLTest(realTag, checkedAt, g.interval, force) {
+			continue
+		}
 		b.Go(realTag, func() (any, error) {
+			defer g.history.FinishURLTest(realTag, checkedAt)
 			testCtx, cancel := context.WithTimeout(g.ctx, C.TCPTimeout)
 			defer cancel()
 			t, err := urltest.URLTest(testCtx, g.link, p)
