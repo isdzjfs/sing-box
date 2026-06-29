@@ -109,6 +109,7 @@ func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
 }
 
 func (s *URLTest) CheckOutbounds() {
+	s.group.Touch()
 	s.group.CheckOutbounds(true)
 }
 
@@ -244,6 +245,7 @@ func (g *URLTestGroup) PostStart() {
 	defer g.access.Unlock()
 	g.started = true
 	g.lastActive.Store(time.Now())
+	g.startTickerLocked()
 	go g.CheckOutbounds(false)
 }
 
@@ -257,6 +259,10 @@ func (g *URLTestGroup) Touch() {
 		g.lastActive.Store(time.Now())
 		return
 	}
+	g.startTickerLocked()
+}
+
+func (g *URLTestGroup) startTickerLocked() {
 	ticker := time.NewTicker(g.interval)
 	g.ticker = ticker
 	g.pauseCallback = pause.RegisterTicker(g.pause, ticker, g.interval, nil)
