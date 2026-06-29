@@ -25,7 +25,10 @@ type HistoryStorage struct {
 	updateHooks    []*observable.Subscriber[struct{}]
 }
 
-const maxHistoryEntries = 20
+const (
+	maxHistoryEntries    = 20
+	duplicateCheckWindow = time.Second
+)
 
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
@@ -102,7 +105,7 @@ func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, interva
 	}
 	if !force {
 		history := s.lastHistoryLocked(tag)
-		if history != nil && checkedAt.Sub(history.Time) < interval {
+		if history != nil && checkedAt.Sub(history.Time) < duplicateCheckWindow {
 			return false
 		}
 	}
