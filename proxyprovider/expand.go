@@ -2,6 +2,7 @@ package proxyprovider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,18 @@ type resolvedProxy struct {
 	proxyType    string
 }
 
+type providerContentUnavailable struct {
+	err error
+}
+
+func (e providerContentUnavailable) Error() string {
+	return e.err.Error()
+}
+
+func (e providerContentUnavailable) Unwrap() error {
+	return e.err
+}
+
 func Expand(ctx context.Context, logger log.ContextLogger, options *option.Options) error {
 	if len(options.ProxyProviders) == 0 {
 		return nil
@@ -46,6 +59,7 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 		providerNames = append(providerNames, name)
 	}
 	sort.Strings(providerNames)
+	hasUnavailableProvider := false
 	for _, name := range providerNames {
 		providerOptions := options.ProxyProviders[name]
 		if options.ProxyProviderDefaults != nil {
@@ -53,6 +67,13 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 		}
 		provider, err := resolveProvider(ctx, logger, name, providerOptions, usedTags, domainResolver)
 		if err != nil {
+			var unavailable providerContentUnavailable
+			if errors.As(err, &unavailable) {
+				logger.Warn("fetch proxy-provider ", name, " failed without cached content, skipping: ", unavailable.err)
+				providers[name] = resolvedProvider{}
+				hasUnavailableProvider = true
+				continue
+			}
 			return E.Cause(err, "proxy-provider ", name)
 		}
 		providers[name] = provider
@@ -63,6 +84,7 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 			return err
 		}
 	}
+	pruneMissingGroupDependencies(logger, options, hasUnavailableProvider)
 	return nil
 }
 
@@ -308,6 +330,63 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 	return resolved, nil
 }
 
+func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Options, hasUnavailableProvider bool) {
+	availableTags := existingOutboundTags(options)
+	for i := range options.Outbounds {
+		switch options.Outbounds[i].Type {
+		case "selector":
+			groupOptions, ok := options.Outbounds[i].Options.(*option.SelectorOutboundOptions)
+			if !ok {
+				continue
+			}
+			pruneMissing := hasUnavailableProvider || !selectorUsesProviderExpansion(groupOptions)
+			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider, pruneMissing)
+			if pruneMissing && groupOptions.Default != "" && !availableTags[groupOptions.Default] {
+				logger.Warn("outbound group ", options.Outbounds[i].Tag, " default outbound unavailable, clearing: ", groupOptions.Default)
+				groupOptions.Default = ""
+			}
+		case "urltest":
+			groupOptions, ok := options.Outbounds[i].Options.(*option.URLTestOutboundOptions)
+			if !ok {
+				continue
+			}
+			pruneMissing := hasUnavailableProvider || !urlTestUsesProviderExpansion(groupOptions)
+			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider, pruneMissing)
+		}
+	}
+}
+
+func selectorUsesProviderExpansion(options *option.SelectorOutboundOptions) bool {
+	return len(options.Use) > 0 || options.Filter != "" || options.ExcludeFilter != "" || options.ExcludeType != ""
+}
+
+func urlTestUsesProviderExpansion(options *option.URLTestOutboundOptions) bool {
+	return len(options.Use) > 0 || options.Filter != "" || options.ExcludeFilter != "" || options.ExcludeType != ""
+}
+
+func pruneMissingOutbounds(logger log.ContextLogger, groupTag string, outbounds []string, availableTags map[string]bool, hasUnavailableProvider bool, pruneMissing bool) []string {
+	if len(outbounds) == 0 {
+		return outbounds
+	}
+	pruned := outbounds[:0]
+	for _, tag := range outbounds {
+		if availableTags[tag] {
+			pruned = append(pruned, tag)
+			continue
+		}
+		if !pruneMissing {
+			pruned = append(pruned, tag)
+			continue
+		}
+		if hasUnavailableProvider {
+			logger.Warn("outbound group ", groupTag, " member unavailable, skipping: ", tag)
+		} else {
+			logger.Warn("outbound group ", groupTag, " member not found, skipping: ", tag)
+		}
+	}
+	return pruned
+}
+
 func loadProviderContent(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider) ([]byte, error) {
 	switch strings.ToLower(provider.Type) {
 	case "file":
@@ -329,7 +408,11 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 		cachePath = filemanager.BasePath(ctx, cachePath)
 		if provider.Interval > 0 {
 			if stat, err := os.Stat(cachePath); err == nil && time.Since(stat.ModTime()) < time.Duration(provider.Interval)*time.Second {
-				return os.ReadFile(cachePath)
+				if cached, readErr := os.ReadFile(cachePath); readErr == nil {
+					return cached, nil
+				} else {
+					logger.Warn("read fresh proxy-provider ", name, " cache: ", readErr)
+				}
 			}
 		}
 		content, err := fetchProvider(ctx, provider)
@@ -338,7 +421,7 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 				logger.Warn("fetch proxy-provider ", name, " failed, using cached content: ", err)
 				return cached, nil
 			}
-			return nil, err
+			return nil, providerContentUnavailable{err: err}
 		}
 		if err = os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
 			if writeErr := os.WriteFile(cachePath, content, 0o644); writeErr != nil {

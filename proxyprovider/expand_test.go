@@ -2,9 +2,12 @@ package proxyprovider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -581,6 +584,224 @@ proxies:
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
 	}
 }
+
+func TestExpandHTTPProviderUsesFreshCacheWithoutFetching(t *testing.T) {
+	cachePath := writeSubscription(t, `
+proxies:
+  - name: Cached SS
+    type: ss
+    server: cached.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: cached-pass
+`)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected fetch", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type:     "http",
+				URL:      server.URL,
+				Path:     cachePath,
+				Interval: 43200,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"Cached SS"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+}
+
+func TestExpandHTTPProviderFetchFailureUsesCachedContent(t *testing.T) {
+	cachePath := writeSubscription(t, `
+proxies:
+  - name: Cached SS
+    type: ss
+    server: cached.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: cached-pass
+`)
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(cachePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type:     "http",
+				URL:      server.URL,
+				Path:     cachePath,
+				Interval: 1,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"Cached SS"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+}
+
+func TestExpandHTTPProviderFetchFailureWithoutCacheSkipsProvider(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{
+		Outbounds: []string{"DIRECT"},
+		Use:       []string{"sub"},
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "http",
+				URL:  server.URL,
+				Path: filepath.Join(t.TempDir(), "missing.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "DIRECT"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 2 {
+		t.Fatalf("outbound count = %d, want 2", len(options.Outbounds))
+	}
+}
+
+func TestExpandHTTPProviderFetchFailurePrunesUnavailableGroupMembers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{
+		Outbounds: []string{"DIRECT", "低倍率"},
+		Default:   "低倍率",
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "http",
+				URL:  server.URL,
+				Path: filepath.Join(t.TempDir(), "missing.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "DIRECT"},
+			{Type: C.TypeSelector, Tag: "Apple", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if selectorOptions.Default != "" {
+		t.Fatalf("selector default = %q, want empty", selectorOptions.Default)
+	}
+}
+
+func TestExpandPrunesMissingGroupMembersAfterSuccessfulProviderExpansion(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: HK SS
+    type: ss
+    server: hk.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: hk-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{
+		Outbounds: []string{"DIRECT", "低倍率"},
+		Default:   "低倍率",
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "DIRECT"},
+			{Type: C.TypeSelector, Tag: "Apple", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if selectorOptions.Default != "" {
+		t.Fatalf("selector default = %q, want empty", selectorOptions.Default)
+	}
+}
+
+func TestExpandFileProviderMissingPathRemainsFatal(t *testing.T) {
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: filepath.Join(t.TempDir(), "missing.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{Use: []string{"sub"}}},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err == nil {
+		t.Fatal("expected missing file provider to fail")
+	}
+}
+
 func writeSubscription(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "subscription.yaml")
