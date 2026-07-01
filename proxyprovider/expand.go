@@ -314,6 +314,11 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 		}
 		outbound, err := convertProxy(provider, proxy, usedTags, domainResolver)
 		if err != nil {
+			var unsupported unsupportedProxyTypeError
+			if errors.As(err, &unsupported) {
+				logger.Warn("proxy-provider ", name, " proxy ", index, " [", rawName, "] skipped: ", unsupported)
+				continue
+			}
 			return resolvedProvider{}, E.Cause(err, "proxy ", index, " [", rawName, "]")
 		}
 		resolved.proxies = append(resolved.proxies, resolvedProxy{
@@ -398,9 +403,6 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 		if provider.URL == "" {
 			return nil, E.New("missing url")
 		}
-		if provider.Proxy != "" {
-			return nil, E.New("proxy-provider proxy detour is not supported yet")
-		}
 		cachePath := provider.Path
 		if cachePath == "" {
 			cachePath = filepath.Join("proxy_providers", safeFileName(name)+".yaml")
@@ -414,6 +416,15 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 					logger.Warn("read fresh proxy-provider ", name, " cache: ", readErr)
 				}
 			}
+		}
+		providerProxy := strings.TrimSpace(provider.Proxy)
+		if providerProxy != "" && !isDirectProviderProxy(providerProxy) {
+			err := E.New("proxy-provider proxy detour is not supported yet: ", providerProxy)
+			if cached, readErr := os.ReadFile(cachePath); readErr == nil {
+				logger.Warn("fetch proxy-provider ", name, " skipped, using cached content: ", err)
+				return cached, nil
+			}
+			return nil, providerContentUnavailable{err: err}
 		}
 		content, err := fetchProvider(ctx, provider)
 		if err != nil {
@@ -544,6 +555,10 @@ func proxyTypeName(proxyType string) string {
 	default:
 		return proxyType
 	}
+}
+
+func isDirectProviderProxy(proxy string) bool {
+	return strings.EqualFold(proxy, "direct")
 }
 
 func safeFileName(name string) string {

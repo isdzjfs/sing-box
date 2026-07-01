@@ -13,41 +13,54 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
+type unsupportedProxyTypeError struct {
+	proxyType string
+}
+
+func (e unsupportedProxyTypeError) Error() string {
+	if e.proxyType == "" {
+		return "unsupported proxy type"
+	}
+	return "unsupported proxy type: " + e.proxyType
+}
+
 func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags map[string]bool, domainResolver string) (option.Outbound, error) {
 	rawName := stringValue(proxy, "name")
 	tag := provider.Override.AdditionalPrefix + rawName
-	if usedTags[tag] {
-		return option.Outbound{}, E.New("duplicate outbound tag: ", tag)
-	}
-	usedTags[tag] = true
 	proxyType := strings.ToLower(stringValue(proxy, "type"))
 	var (
 		outboundType    string
 		outboundOptions any
+		converter       func() (any, error)
 		err             error
 	)
 	switch proxyType {
 	case "ss", "shadowsocks":
 		outboundType = C.TypeShadowsocks
-		outboundOptions, err = convertShadowsocks(provider, proxy, domainResolver)
+		converter = func() (any, error) { return convertShadowsocks(provider, proxy, domainResolver) }
 	case "vless":
 		outboundType = C.TypeVLESS
-		outboundOptions, err = convertVLESS(provider, proxy, domainResolver)
+		converter = func() (any, error) { return convertVLESS(provider, proxy, domainResolver) }
 	case "trojan":
 		outboundType = C.TypeTrojan
-		outboundOptions, err = convertTrojan(provider, proxy, domainResolver)
+		converter = func() (any, error) { return convertTrojan(provider, proxy, domainResolver) }
 	case "hy2", "hysteria2":
 		outboundType = C.TypeHysteria2
-		outboundOptions, err = convertHysteria2(provider, proxy, domainResolver)
+		converter = func() (any, error) { return convertHysteria2(provider, proxy, domainResolver) }
 	case "anytls":
 		outboundType = C.TypeAnyTLS
-		outboundOptions, err = convertAnyTLS(provider, proxy, domainResolver)
+		converter = func() (any, error) { return convertAnyTLS(provider, proxy, domainResolver) }
 	default:
-		return option.Outbound{}, E.New("unsupported proxy type: ", proxyType)
+		return option.Outbound{}, unsupportedProxyTypeError{proxyType: proxyType}
 	}
+	if usedTags[tag] {
+		return option.Outbound{}, E.New("duplicate outbound tag: ", tag)
+	}
+	outboundOptions, err = converter()
 	if err != nil {
 		return option.Outbound{}, err
 	}
+	usedTags[tag] = true
 	return option.Outbound{
 		Type:    outboundType,
 		Tag:     tag,
