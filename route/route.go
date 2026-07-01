@@ -790,7 +790,15 @@ func (r *Router) actionSniff(
 }
 
 func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve) error {
-	if metadata.Destination.IsDomain() {
+	resolveDomain := metadata.Destination.Fqdn
+	if resolveDomain == "" &&
+		metadata.Network == N.NetworkUDP &&
+		metadata.Destination.IsIP() &&
+		M.IsDomainName(metadata.Domain) {
+		// QUIC sniff can discover SNI while the original UDP destination is still an IP.
+		resolveDomain = metadata.Domain
+	}
+	if resolveDomain != "" {
 		var transport adapter.DNSTransport
 		if action.Server != "" {
 			var loaded bool
@@ -799,7 +807,7 @@ func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundCon
 				return E.New("DNS server not found: ", action.Server)
 			}
 		}
-		addresses, err := r.dns.Lookup(adapter.WithContext(ctx, metadata), metadata.Destination.Fqdn, adapter.DNSQueryOptions{
+		addresses, err := r.dns.Lookup(adapter.WithContext(ctx, metadata), resolveDomain, adapter.DNSQueryOptions{
 			Transport:              transport,
 			Strategy:               action.Strategy,
 			DisableCache:           action.DisableCache,
