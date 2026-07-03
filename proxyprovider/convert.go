@@ -41,6 +41,9 @@ func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags 
 	case "vless":
 		outboundType = C.TypeVLESS
 		converter = func() (any, error) { return convertVLESS(provider, proxy, domainResolver) }
+	case "vmess":
+		outboundType = C.TypeVMess
+		converter = func() (any, error) { return convertVMess(provider, proxy, domainResolver) }
 	case "trojan":
 		outboundType = C.TypeTrojan
 		converter = func() (any, error) { return convertTrojan(provider, proxy, domainResolver) }
@@ -102,6 +105,34 @@ func convertVLESS(provider option.ProxyProvider, proxy map[string]any, domainRes
 	}
 	if packetEncoding := stringValue(proxy, "packet-encoding", "packet_encoding"); packetEncoding != "" {
 		options.PacketEncoding = &packetEncoding
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertVMess(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.VMessOutboundOptions, error) {
+	options := &option.VMessOutboundOptions{
+		ServerOptions: serverOptions(proxy),
+		UUID:          stringValue(proxy, "uuid"),
+		Security:      stringValue(proxy, "security", "cipher"),
+		AlterId:       intValue(proxy, "alterId", "alter-id", "alter_id", "aid"),
+		Network:       networkList(provider, proxy),
+		Transport:     v2rayTransportOptions(proxy),
+	}
+	options.TLS = tlsOptions(proxy, false)
+	if options.UUID == "" {
+		return nil, E.New("missing uuid")
+	}
+	if options.Security == "" {
+		options.Security = "auto"
+	}
+	if globalPadding, loaded := boolValue(proxy, "global-padding", "global_padding"); loaded {
+		options.GlobalPadding = globalPadding
+	}
+	if authenticatedLength, loaded := boolValue(proxy, "authenticated-length", "authenticated_length"); loaded {
+		options.AuthenticatedLength = authenticatedLength
+	}
+	if packetEncoding := stringValue(proxy, "packet-encoding", "packet_encoding"); packetEncoding != "" {
+		options.PacketEncoding = packetEncoding
 	}
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }

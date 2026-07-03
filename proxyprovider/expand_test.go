@@ -143,6 +143,12 @@ proxies:
     port: 8388
     cipher: aes-128-gcm
     password: ss-pass
+  - name: VMess
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000003
+    cipher: auto
 `)
 	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
 	options := option.Options{
@@ -166,6 +172,7 @@ proxies:
 		"Trojan": C.TypeTrojan,
 		"HY2":    C.TypeHysteria2,
 		"SS":     C.TypeShadowsocks,
+		"VMess":  C.TypeVMess,
 	}
 	if len(selectorOptions.Outbounds) != len(wantTypes) {
 		t.Fatalf("selector outbounds = %#v", selectorOptions.Outbounds)
@@ -184,12 +191,90 @@ proxies:
 	}
 }
 
+func TestExpandConvertsVMessOptions(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: JP VMess WS
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000003
+    alterId: 1
+    cipher: chacha20-poly1305
+    udp: false
+    tls: true
+    servername: vmess.example.com
+    network: ws
+    ws-opts:
+      path: /ws
+      headers:
+        Host: cdn.example.com
+    packet-encoding: xudp
+    global-padding: true
+    authenticated-length: true
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"JP VMess WS"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	generated := options.Outbounds[1]
+	if generated.Type != C.TypeVMess || generated.Tag != "JP VMess WS" {
+		t.Fatalf("generated outbound = %s/%s", generated.Type, generated.Tag)
+	}
+	vmessOptions := generated.Options.(*option.VMessOutboundOptions)
+	if vmessOptions.UUID != "00000000-0000-0000-0000-000000000003" {
+		t.Fatalf("uuid = %q", vmessOptions.UUID)
+	}
+	if vmessOptions.Security != "chacha20-poly1305" {
+		t.Fatalf("security = %q", vmessOptions.Security)
+	}
+	if vmessOptions.AlterId != 1 {
+		t.Fatalf("alter id = %d, want 1", vmessOptions.AlterId)
+	}
+	if vmessOptions.Network != option.NetworkList("tcp") {
+		t.Fatalf("network = %q, want tcp", vmessOptions.Network)
+	}
+	if vmessOptions.PacketEncoding != "xudp" {
+		t.Fatalf("packet encoding = %q, want xudp", vmessOptions.PacketEncoding)
+	}
+	if !vmessOptions.GlobalPadding || !vmessOptions.AuthenticatedLength {
+		t.Fatalf("vmess protocol options = global_padding:%v authenticated_length:%v", vmessOptions.GlobalPadding, vmessOptions.AuthenticatedLength)
+	}
+	if vmessOptions.TLS == nil || !vmessOptions.TLS.Enabled || vmessOptions.TLS.ServerName != "vmess.example.com" {
+		t.Fatalf("unexpected TLS options: %#v", vmessOptions.TLS)
+	}
+	if vmessOptions.Transport == nil || vmessOptions.Transport.Type != C.V2RayTransportTypeWebsocket {
+		t.Fatalf("unexpected transport: %#v", vmessOptions.Transport)
+	}
+	if vmessOptions.Transport.WebsocketOptions.Path != "/ws" {
+		t.Fatalf("ws path = %q", vmessOptions.Transport.WebsocketOptions.Path)
+	}
+	if got := vmessOptions.Transport.WebsocketOptions.Headers["Host"]; len(got) != 1 || got[0] != "cdn.example.com" {
+		t.Fatalf("ws host header = %#v, want cdn.example.com", got)
+	}
+}
+
 func TestExpandSkipsUnsupportedProxyTypes(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
   - name: Shared
-    type: vmess
-    server: vmess.example.com
+    type: tuic
+    server: tuic.example.com
     port: 443
   - name: Shared
     type: ss
@@ -198,8 +283,8 @@ proxies:
     cipher: aes-128-gcm
     password: ss-pass
   - name: Shared
-    type: tuic
-    server: tuic.example.com
+    type: wireguard
+    server: wireguard.example.com
     port: 443
 `)
 	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
@@ -232,9 +317,9 @@ proxies:
 func TestExpandUnsupportedOnlyProviderRemainsFatal(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
-  - name: VMess
-    type: vmess
-    server: vmess.example.com
+  - name: TUIC
+    type: tuic
+    server: tuic.example.com
     port: 443
 `)
 	options := option.Options{
@@ -642,6 +727,7 @@ proxies:
 			},
 		},
 		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "自动选择"},
 			{Type: C.TypeSelector, Tag: "默认代理", Options: selectorOptions},
 		},
 	}
@@ -652,6 +738,46 @@ proxies:
 	want := []string{"自动选择", "A | HK VLESS", "B | JP VLESS"}
 	if got := selectorOptions.Outbounds; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+}
+
+func TestExpandPrunesMissingMembersFromProviderExpandedGroup(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: JP VLESS
+    type: vless
+    server: jp.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000002
+    tls: true
+`)
+	selectorOptions := &option.SelectorOutboundOptions{
+		Outbounds: []string{"DIRECT", "自动选择(香港外)"},
+		Filter:    "JP",
+		Default:   "自动选择(香港外)",
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "DIRECT"},
+			{Type: C.TypeSelector, Tag: "默认代理", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"DIRECT", "JP VLESS"}
+	if got := selectorOptions.Outbounds; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if selectorOptions.Default != "" {
+		t.Fatalf("selector default = %q, want empty", selectorOptions.Default)
 	}
 }
 

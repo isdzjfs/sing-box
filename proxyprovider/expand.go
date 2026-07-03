@@ -344,9 +344,8 @@ func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Opt
 			if !ok {
 				continue
 			}
-			pruneMissing := hasUnavailableProvider || !selectorUsesProviderExpansion(groupOptions)
-			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider, pruneMissing)
-			if pruneMissing && groupOptions.Default != "" && !availableTags[groupOptions.Default] {
+			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider)
+			if groupOptions.Default != "" && !availableTags[groupOptions.Default] {
 				logger.Warn("outbound group ", options.Outbounds[i].Tag, " default outbound unavailable, clearing: ", groupOptions.Default)
 				groupOptions.Default = ""
 			}
@@ -355,31 +354,18 @@ func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Opt
 			if !ok {
 				continue
 			}
-			pruneMissing := hasUnavailableProvider || !urlTestUsesProviderExpansion(groupOptions)
-			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider, pruneMissing)
+			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider)
 		}
 	}
 }
 
-func selectorUsesProviderExpansion(options *option.SelectorOutboundOptions) bool {
-	return len(options.Use) > 0 || options.Filter != "" || options.ExcludeFilter != "" || options.ExcludeType != ""
-}
-
-func urlTestUsesProviderExpansion(options *option.URLTestOutboundOptions) bool {
-	return len(options.Use) > 0 || options.Filter != "" || options.ExcludeFilter != "" || options.ExcludeType != ""
-}
-
-func pruneMissingOutbounds(logger log.ContextLogger, groupTag string, outbounds []string, availableTags map[string]bool, hasUnavailableProvider bool, pruneMissing bool) []string {
+func pruneMissingOutbounds(logger log.ContextLogger, groupTag string, outbounds []string, availableTags map[string]bool, hasUnavailableProvider bool) []string {
 	if len(outbounds) == 0 {
 		return outbounds
 	}
 	pruned := outbounds[:0]
 	for _, tag := range outbounds {
 		if availableTags[tag] {
-			pruned = append(pruned, tag)
-			continue
-		}
-		if !pruneMissing {
 			pruned = append(pruned, tag)
 			continue
 		}
@@ -546,6 +532,8 @@ func proxyTypeName(proxyType string) string {
 		return "Shadowsocks"
 	case "vless":
 		return "VLESS"
+	case "vmess":
+		return "VMess"
 	case "trojan":
 		return "Trojan"
 	case "hy2", "hysteria2":
