@@ -30,6 +30,7 @@ proxies:
     uuid: 00000000-0000-0000-0000-000000000000
     udp: false
     tls: true
+    skip-cert-verify: true
     sni: vless.example.com
     network: ws
     ws-opts:
@@ -38,6 +39,7 @@ proxies:
         Host: cdn.example.com
 `)
 	enableUDP := true
+	disableInsecure := false
 	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
 	urlTestOptions := &option.URLTestOutboundOptions{Use: []string{"sub"}}
 	options := option.Options{
@@ -46,6 +48,7 @@ proxies:
 			Override: option.ProxyProviderOverride{
 				UDP:       &enableUDP,
 				IPVersion: "ipv4",
+				Insecure:  &disableInsecure,
 			},
 		},
 		ProxyProviders: map[string]option.ProxyProvider{
@@ -101,11 +104,27 @@ proxies:
 	if vlessOptions.TLS == nil || !vlessOptions.TLS.Enabled || vlessOptions.TLS.ServerName != "vless.example.com" {
 		t.Fatalf("unexpected TLS options: %#v", vlessOptions.TLS)
 	}
+	if vlessOptions.TLS.Insecure {
+		t.Fatalf("tls insecure = true, want provider override to force false")
+	}
 	if vlessOptions.Transport == nil || vlessOptions.Transport.Type != C.V2RayTransportTypeWebsocket {
 		t.Fatalf("unexpected transport: %#v", vlessOptions.Transport)
 	}
 	if vlessOptions.Transport.WebsocketOptions.Path != "/ws" {
 		t.Fatalf("ws path = %q", vlessOptions.Transport.WebsocketOptions.Path)
+	}
+}
+
+func TestMergeProxyProviderOverrideKeepsExplicitInsecureFalse(t *testing.T) {
+	defaultInsecure := true
+	overrideInsecure := false
+	merged := mergeProxyProviderOverride(option.ProxyProviderOverride{
+		Insecure: &defaultInsecure,
+	}, option.ProxyProviderOverride{
+		Insecure: &overrideInsecure,
+	})
+	if merged.Insecure == nil || *merged.Insecure {
+		t.Fatalf("merged insecure = %#v, want explicit false", merged.Insecure)
 	}
 }
 

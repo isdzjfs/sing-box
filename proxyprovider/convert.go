@@ -99,7 +99,7 @@ func convertVLESS(provider option.ProxyProvider, proxy map[string]any, domainRes
 		Network:       networkList(provider, proxy),
 		Transport:     v2rayTransportOptions(proxy),
 	}
-	options.TLS = tlsOptions(proxy, false)
+	options.TLS = tlsOptions(proxy, provider.Override, false)
 	if options.UUID == "" {
 		return nil, E.New("missing uuid")
 	}
@@ -118,7 +118,7 @@ func convertVMess(provider option.ProxyProvider, proxy map[string]any, domainRes
 		Network:       networkList(provider, proxy),
 		Transport:     v2rayTransportOptions(proxy),
 	}
-	options.TLS = tlsOptions(proxy, false)
+	options.TLS = tlsOptions(proxy, provider.Override, false)
 	if options.UUID == "" {
 		return nil, E.New("missing uuid")
 	}
@@ -144,7 +144,7 @@ func convertTrojan(provider option.ProxyProvider, proxy map[string]any, domainRe
 		Network:       networkList(provider, proxy),
 		Transport:     v2rayTransportOptions(proxy),
 	}
-	options.TLS = tlsOptions(proxy, true)
+	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if options.Password == "" {
 		return nil, E.New("missing password")
 	}
@@ -160,7 +160,7 @@ func convertHysteria2(provider option.ProxyProvider, proxy map[string]any, domai
 		UpMbps:        intValue(proxy, "up", "up-mbps", "up_mbps"),
 		DownMbps:      intValue(proxy, "down", "down-mbps", "down_mbps"),
 	}
-	options.TLS = tlsOptions(proxy, true)
+	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if obfsType := stringValue(proxy, "obfs"); obfsType != "" {
 		options.Obfs = &option.Hysteria2Obfs{
 			Type:     obfsType,
@@ -186,7 +186,7 @@ func convertAnyTLS(provider option.ProxyProvider, proxy map[string]any, domainRe
 		ServerOptions: serverOptions(proxy),
 		Password:      stringValue(proxy, "password"),
 	}
-	options.TLS = tlsOptions(proxy, true)
+	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if options.Password == "" {
 		return nil, E.New("missing password")
 	}
@@ -243,7 +243,7 @@ func networkList(provider option.ProxyProvider, proxy map[string]any) option.Net
 	return ""
 }
 
-func tlsOptions(proxy map[string]any, defaultEnabled bool) *option.OutboundTLSOptions {
+func tlsOptions(proxy map[string]any, override option.ProxyProviderOverride, defaultEnabled bool) *option.OutboundTLSOptions {
 	enabled, hasTLS := boolValue(proxy, "tls")
 	realityOptions := mapValue(proxy, "reality-opts", "reality_opts")
 	if defaultEnabled || enabled || !hasTLS && hasTLSFields(proxy) || len(realityOptions) > 0 {
@@ -254,6 +254,9 @@ func tlsOptions(proxy map[string]any, defaultEnabled bool) *option.OutboundTLSOp
 		}
 		if insecure, loaded := boolValue(proxy, "skip-cert-verify", "skip_cert_verify", "insecure"); loaded {
 			tlsOptions.Insecure = insecure
+		}
+		if override.Insecure != nil {
+			tlsOptions.Insecure = *override.Insecure
 		}
 		if fingerprint := stringValue(proxy, "client-fingerprint", "client_fingerprint"); fingerprint != "" {
 			tlsOptions.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}

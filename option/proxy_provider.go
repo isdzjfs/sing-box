@@ -20,5 +20,6 @@ type ProxyProvider struct {
 type ProxyProviderOverride struct {
 	UDP              *bool  `json:"udp,omitempty"`
 	IPVersion        string `json:"ip-version,omitempty"`
+	Insecure         *bool  `json:"insecure,omitempty"`
 	AdditionalPrefix string `json:"additional-prefix,omitempty"`
 }

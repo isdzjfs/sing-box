@@ -15,7 +15,8 @@ func TestOptionsUnmarshalProxyProviders(t *testing.T) {
 			"exclude-type": "Hysteria|Hysteria2",
 			"override": {
 				"udp": true,
-				"ip-version": "ipv4"
+				"ip-version": "ipv4",
+				"insecure": false
 			}
 		},
 		"proxy-providers": {
@@ -36,6 +37,9 @@ func TestOptionsUnmarshalProxyProviders(t *testing.T) {
 	}
 	if options.ProxyProviderDefaults.Interval != 43200 || options.ProxyProviderDefaults.ExcludeFilter != "流量|到期" {
 		t.Fatalf("unexpected provider defaults: %#v", options.ProxyProviderDefaults)
+	}
+	if options.ProxyProviderDefaults.Override.Insecure == nil || *options.ProxyProviderDefaults.Override.Insecure {
+		t.Fatalf("unexpected default override insecure: %#v", options.ProxyProviderDefaults.Override.Insecure)
 	}
 	provider := options.ProxyProviders["sub"]
 	if provider.URL != "https://example.com/sub.yaml" {

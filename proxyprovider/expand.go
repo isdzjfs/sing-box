@@ -141,6 +141,9 @@ func mergeProxyProviderOverride(defaults option.ProxyProviderOverride, override 
 	if override.IPVersion == "" {
 		override.IPVersion = defaults.IPVersion
 	}
+	if override.Insecure == nil {
+		override.Insecure = defaults.Insecure
+	}
 	if override.AdditionalPrefix == "" {
 		override.AdditionalPrefix = defaults.AdditionalPrefix
 	}
