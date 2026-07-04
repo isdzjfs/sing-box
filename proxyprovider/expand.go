@@ -2,8 +2,10 @@ package proxyprovider
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -286,9 +288,9 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 	if err != nil {
 		return resolvedProvider{}, err
 	}
-	var subscription subscriptionFile
-	if err = yaml.Unmarshal(content, &subscription); err != nil {
-		return resolvedProvider{}, E.Cause(err, "decode subscription")
+	subscription, err := parseSubscription(content)
+	if err != nil {
+		return resolvedProvider{}, err
 	}
 	if len(subscription.Proxies) == 0 {
 		return resolvedProvider{}, E.New("subscription does not contain proxies")
@@ -336,6 +338,129 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 		return resolvedProvider{}, E.New("subscription does not contain usable proxies")
 	}
 	return resolved, nil
+}
+
+func parseSubscription(content []byte) (subscriptionFile, error) {
+	var subscription subscriptionFile
+	yamlErr := yaml.Unmarshal(content, &subscription)
+	if yamlErr == nil && len(subscription.Proxies) > 0 {
+		return subscription, nil
+	}
+	if uriSubscription := parseURIListSubscription(content); len(uriSubscription.Proxies) > 0 {
+		return uriSubscription, nil
+	}
+	if yamlErr != nil {
+		return subscriptionFile{}, E.Cause(yamlErr, "decode subscription")
+	}
+	return subscription, nil
+}
+
+func parseURIListSubscription(content []byte) subscriptionFile {
+	textCandidates := []string{string(content)}
+	if decoded, ok := decodeBase64Subscription(content); ok {
+		textCandidates = append([]string{decoded}, textCandidates...)
+	}
+	var subscription subscriptionFile
+	for _, text := range textCandidates {
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "://") {
+				continue
+			}
+			uri, err := url.Parse(line)
+			if err != nil {
+				continue
+			}
+			switch strings.ToLower(uri.Scheme) {
+			case "tuic":
+				if proxy := proxyFromTUICURI(uri); proxy != nil {
+					subscription.Proxies = append(subscription.Proxies, proxy)
+				}
+			}
+		}
+		if len(subscription.Proxies) > 0 {
+			return subscription
+		}
+	}
+	return subscription
+}
+
+func decodeBase64Subscription(content []byte) (string, bool) {
+	compact := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		default:
+			return r
+		}
+	}, string(content))
+	if compact == "" {
+		return "", false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		decoded, err := encoding.DecodeString(compact)
+		if err == nil && strings.Contains(string(decoded), "://") {
+			return string(decoded), true
+		}
+	}
+	return "", false
+}
+
+func proxyFromTUICURI(uri *url.URL) map[string]any {
+	if uri.Hostname() == "" {
+		return nil
+	}
+	name := uri.Fragment
+	if decodedName, err := url.QueryUnescape(name); err == nil {
+		name = decodedName
+	}
+	if name == "" {
+		name = uri.Hostname()
+	}
+	proxy := map[string]any{
+		"name":   name,
+		"type":   "tuic",
+		"server": uri.Hostname(),
+		"port":   uri.Port(),
+		"uuid":   uri.User.Username(),
+	}
+	if password, loaded := uri.User.Password(); loaded {
+		proxy["password"] = password
+	}
+	query := uri.Query()
+	copyQueryValue(proxy, query, "sni", "sni")
+	copyQueryValue(proxy, query, "alpn", "alpn")
+	copyQueryValue(proxy, query, "fp", "client-fingerprint")
+	copyQueryValue(proxy, query, "congestion_control", "congestion_control")
+	copyQueryValue(proxy, query, "udp_relay_mode", "udp_relay_mode")
+	copyQueryValue(proxy, query, "reduce_rtt", "reduce_rtt")
+	copyQueryValue(proxy, query, "udp", "udp")
+	copyQueryValue(proxy, query, "tfo", "tfo")
+	copyQueryValue(proxy, query, "allow_insecure", "skip-cert-verify")
+	copyQueryValue(proxy, query, "insecure", "skip-cert-verify")
+	copyQueryValue(proxy, query, "disable_sni", "disable_sni")
+	return proxy
+}
+
+func copyQueryValue(proxy map[string]any, query url.Values, queryKey string, proxyKey string) {
+	value := query.Get(queryKey)
+	if value == "" {
+		return
+	}
+	if proxyKey == "alpn" {
+		values := strings.Split(value, ",")
+		for index := range values {
+			values[index] = strings.TrimSpace(values[index])
+		}
+		proxy[proxyKey] = values
+		return
+	}
+	proxy[proxyKey] = value
 }
 
 func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Options, hasUnavailableProvider bool) {

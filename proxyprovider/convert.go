@@ -5,9 +5,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/byteformats"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
 	N "github.com/sagernet/sing/common/network"
@@ -50,6 +52,9 @@ func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags 
 	case "hy2", "hysteria2":
 		outboundType = C.TypeHysteria2
 		converter = func() (any, error) { return convertHysteria2(provider, proxy, domainResolver) }
+	case "tuic":
+		outboundType = C.TypeTUIC
+		converter = func() (any, error) { return convertTUIC(provider, proxy, domainResolver) }
 	case "anytls":
 		outboundType = C.TypeAnyTLS
 		converter = func() (any, error) { return convertAnyTLS(provider, proxy, domainResolver) }
@@ -170,6 +175,79 @@ func convertHysteria2(provider option.ProxyProvider, proxy map[string]any, domai
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }
 
+func convertTUIC(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.TUICOutboundOptions, error) {
+	if token := stringValue(proxy, "token"); token != "" {
+		return nil, unsupportedProxyTypeError{proxyType: "tuic v4/token"}
+	}
+	options := &option.TUICOutboundOptions{
+		ServerOptions:     serverOptions(proxy),
+		UUID:              stringValue(proxy, "uuid"),
+		Password:          stringValue(proxy, "password"),
+		CongestionControl: stringValue(proxy, "congestion-controller", "congestion_control"),
+		UDPRelayMode:      stringValue(proxy, "udp-relay-mode", "udp_relay_mode"),
+		Network:           networkList(provider, proxy),
+	}
+	options.TLS = tlsOptions(proxy, provider.Override, true)
+	if options.TLS != nil {
+		// TUIC is QUIC-based in sing-box; uTLS is only valid for TCP TLS handshakes.
+		options.TLS.UTLS = nil
+	}
+	if options.UUID == "" {
+		return nil, E.New("missing uuid")
+	}
+	if options.Password == "" {
+		return nil, E.New("missing password")
+	}
+	if serverIP := stringValue(proxy, "ip"); serverIP != "" {
+		if options.TLS.ServerName == "" && !options.TLS.DisableSNI {
+			options.TLS.ServerName = options.Server
+		}
+		options.Server = serverIP
+	}
+	if udpOverStream, loaded := boolValue(proxy, "udp-over-stream", "udp_over_stream"); loaded {
+		options.UDPOverStream = udpOverStream
+		if udpOverStream {
+			options.UDPRelayMode = ""
+		}
+	}
+	if tcpFastOpen, loaded := boolValue(proxy, "tfo", "fast-open", "fast_open"); loaded {
+		options.TCPFastOpen = tcpFastOpen
+	}
+	if zeroRTT, loaded := boolValue(proxy, "zero-rtt-handshake", "zero_rtt_handshake", "reduce-rtt", "reduce_rtt"); loaded {
+		options.ZeroRTTHandshake = zeroRTT
+	}
+	if heartbeat := intValue(proxy, "heartbeat-interval", "heartbeat_interval"); heartbeat > 0 {
+		options.Heartbeat = badoption.Duration(time.Duration(heartbeat) * time.Millisecond)
+	}
+	if receiveWindow := intValue(proxy, "recv-window-conn", "recv_window_conn"); receiveWindow > 0 {
+		streamReceiveWindow, err := memoryBytesFromInt(receiveWindow)
+		if err != nil {
+			return nil, E.Cause(err, "recv-window-conn")
+		}
+		options.StreamReceiveWindow = streamReceiveWindow
+	}
+	if receiveWindow := intValue(proxy, "recv-window", "recv_window"); receiveWindow > 0 {
+		connectionReceiveWindow, err := memoryBytesFromInt(receiveWindow)
+		if err != nil {
+			return nil, E.Cause(err, "recv-window")
+		}
+		options.ConnectionReceiveWindow = connectionReceiveWindow
+	}
+	if maxOpenStreams := intValue(proxy, "max-open-streams", "max_open_streams"); maxOpenStreams > 0 {
+		options.MaxConcurrentStreams = maxOpenStreams
+	}
+	if disableMTUDiscovery, loaded := boolValue(proxy, "disable-mtu-discovery", "disable_mtu_discovery"); loaded {
+		options.DisablePathMTUDiscovery = disableMTUDiscovery
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func memoryBytesFromInt(value int) (byteformats.MemoryBytes, error) {
+	var result byteformats.MemoryBytes
+	err := result.UnmarshalJSON([]byte(strconv.Quote(strconv.Itoa(value) + " B")))
+	return result, err
+}
+
 func hysteria2ServerPorts(proxy map[string]any) badoption.Listable[string] {
 	values := stringsFromAny(firstValue(proxy, "ports", "mport", "server-ports", "server_ports"))
 	if len(values) == 0 {
@@ -258,7 +336,10 @@ func tlsOptions(proxy map[string]any, override option.ProxyProviderOverride, def
 		if override.Insecure != nil {
 			tlsOptions.Insecure = *override.Insecure
 		}
-		if fingerprint := stringValue(proxy, "client-fingerprint", "client_fingerprint"); fingerprint != "" {
+		if disableSNI, loaded := boolValue(proxy, "disable-sni", "disable_sni"); loaded {
+			tlsOptions.DisableSNI = disableSNI
+		}
+		if fingerprint := stringValue(proxy, "client-fingerprint", "client_fingerprint", "fp"); fingerprint != "" {
 			tlsOptions.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}
 		}
 		if len(realityOptions) > 0 {

@@ -2,6 +2,7 @@ package proxyprovider
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,6 +211,174 @@ proxies:
 	}
 }
 
+func TestExpandConvertsTUICOptions(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: TUIC V5
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000004
+    password: tuic-pass
+    alpn: [h3]
+    skip-cert-verify: true
+    disable-sni: true
+    client-fingerprint: firefox
+    reduce-rtt: true
+    udp-relay-mode: quic
+    congestion-controller: bbr
+    heartbeat-interval: 12000
+    recv-window-conn: 1234
+    recv-window: 5678
+    max-open-streams: 20
+    disable-mtu-discovery: true
+  - name: TUIC IP
+    type: tuic
+    server: tuic-domain.example.com
+    ip: 203.0.113.10
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000005
+    password: tuic-ip-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"TUIC V5", "TUIC IP"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	generated := options.Outbounds[1]
+	if generated.Type != C.TypeTUIC || generated.Tag != "TUIC V5" {
+		t.Fatalf("generated outbound = %s/%s", generated.Type, generated.Tag)
+	}
+	tuicOptions := generated.Options.(*option.TUICOutboundOptions)
+	if tuicOptions.UUID != "00000000-0000-0000-0000-000000000004" || tuicOptions.Password != "tuic-pass" {
+		t.Fatalf("tuic credentials = %s/%s", tuicOptions.UUID, tuicOptions.Password)
+	}
+	if tuicOptions.CongestionControl != "bbr" || tuicOptions.UDPRelayMode != "quic" {
+		t.Fatalf("tuic transport options = congestion:%q udp_relay_mode:%q", tuicOptions.CongestionControl, tuicOptions.UDPRelayMode)
+	}
+	if !tuicOptions.ZeroRTTHandshake || time.Duration(tuicOptions.Heartbeat) != 12*time.Second {
+		t.Fatalf("tuic timing options = zero_rtt:%v heartbeat:%v", tuicOptions.ZeroRTTHandshake, tuicOptions.Heartbeat)
+	}
+	if tuicOptions.StreamReceiveWindow.Value() != 1234 || tuicOptions.ConnectionReceiveWindow.Value() != 5678 {
+		t.Fatalf("tuic receive windows = stream:%d connection:%d", tuicOptions.StreamReceiveWindow.Value(), tuicOptions.ConnectionReceiveWindow.Value())
+	}
+	if tuicOptions.MaxConcurrentStreams != 20 || !tuicOptions.DisablePathMTUDiscovery {
+		t.Fatalf("tuic quic options = max_streams:%d disable_pmtu:%v", tuicOptions.MaxConcurrentStreams, tuicOptions.DisablePathMTUDiscovery)
+	}
+	if tuicOptions.TLS == nil || !tuicOptions.TLS.Enabled || !tuicOptions.TLS.Insecure || !tuicOptions.TLS.DisableSNI {
+		t.Fatalf("unexpected tuic TLS options: %#v", tuicOptions.TLS)
+	}
+	if tuicOptions.TLS.UTLS != nil {
+		t.Fatalf("tuic uTLS = %#v, want nil", tuicOptions.TLS.UTLS)
+	}
+	if len(tuicOptions.TLS.ALPN) != 1 || tuicOptions.TLS.ALPN[0] != "h3" {
+		t.Fatalf("tuic alpn = %#v, want h3", tuicOptions.TLS.ALPN)
+	}
+	ipOptions := options.Outbounds[2].Options.(*option.TUICOutboundOptions)
+	if ipOptions.Server != "203.0.113.10" || ipOptions.TLS == nil || ipOptions.TLS.ServerName != "tuic-domain.example.com" {
+		t.Fatalf("tuic ip override = server:%q tls:%#v", ipOptions.Server, ipOptions.TLS)
+	}
+}
+
+func TestExpandConvertsTUICUDPOverStreamClearsRelayMode(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: TUIC UoS
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000006
+    password: tuic-pass
+    udp-relay-mode: quic
+    udp-over-stream: true
+`)
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: &option.SelectorOutboundOptions{Use: []string{"sub"}}},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	tuicOptions := options.Outbounds[1].Options.(*option.TUICOutboundOptions)
+	if !tuicOptions.UDPOverStream || tuicOptions.UDPRelayMode != "" {
+		t.Fatalf("tuic udp options = udp_over_stream:%v udp_relay_mode:%q", tuicOptions.UDPOverStream, tuicOptions.UDPRelayMode)
+	}
+}
+
+func TestExpandConvertsBase64TUICURIList(t *testing.T) {
+	subscriptionPath := writeSubscription(t, base64.StdEncoding.EncodeToString([]byte(`
+REMARKS=example
+tuic://00000000-0000-0000-0000-000000000007:tuic-uri-pass@tuic.example.com:443?security=tls&fp=firefox&sni=tuic-sni.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=quic&reduce_rtt=1&udp=1&tfo=1#HK+Gomami+01
+`)))
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"HK Gomami 01"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	generated := options.Outbounds[1]
+	if generated.Type != C.TypeTUIC || generated.Tag != "HK Gomami 01" {
+		t.Fatalf("generated outbound = %s/%s", generated.Type, generated.Tag)
+	}
+	tuicOptions := generated.Options.(*option.TUICOutboundOptions)
+	if tuicOptions.UUID != "00000000-0000-0000-0000-000000000007" || tuicOptions.Password != "tuic-uri-pass" {
+		t.Fatalf("tuic credentials = %s/%s", tuicOptions.UUID, tuicOptions.Password)
+	}
+	if tuicOptions.Server != "tuic.example.com" || tuicOptions.ServerPort != 443 {
+		t.Fatalf("tuic server = %s:%d", tuicOptions.Server, tuicOptions.ServerPort)
+	}
+	if tuicOptions.CongestionControl != "bbr" || tuicOptions.UDPRelayMode != "quic" {
+		t.Fatalf("tuic transport options = congestion:%q udp_relay_mode:%q", tuicOptions.CongestionControl, tuicOptions.UDPRelayMode)
+	}
+	if !tuicOptions.ZeroRTTHandshake || !tuicOptions.TCPFastOpen {
+		t.Fatalf("tuic bool options = zero_rtt:%v tfo:%v", tuicOptions.ZeroRTTHandshake, tuicOptions.TCPFastOpen)
+	}
+	if tuicOptions.TLS == nil || tuicOptions.TLS.ServerName != "tuic-sni.example.com" {
+		t.Fatalf("unexpected tuic TLS options: %#v", tuicOptions.TLS)
+	}
+	if tuicOptions.TLS.UTLS != nil {
+		t.Fatalf("tuic uTLS = %#v, want nil", tuicOptions.TLS.UTLS)
+	}
+	if len(tuicOptions.TLS.ALPN) != 1 || tuicOptions.TLS.ALPN[0] != "h3" {
+		t.Fatalf("tuic alpn = %#v, want h3", tuicOptions.TLS.ALPN)
+	}
+}
+
 func TestExpandConvertsVMessOptions(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
@@ -295,6 +464,7 @@ proxies:
     type: tuic
     server: tuic.example.com
     port: 443
+    token: tuic-token
   - name: Shared
     type: ss
     server: ss.example.com
@@ -340,6 +510,7 @@ proxies:
     type: tuic
     server: tuic.example.com
     port: 443
+    token: tuic-token
 `)
 	options := option.Options{
 		ProxyProviders: map[string]option.ProxyProvider{
