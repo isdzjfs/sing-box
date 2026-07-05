@@ -211,6 +211,141 @@ proxies:
 	}
 }
 
+func TestExpandConvertsAdditionalProxyTypes(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: HTTP
+    type: http
+    server: http.example.com
+    port: 443
+    username: http-user
+    password: http-pass
+    tls: true
+    skip-cert-verify: true
+    sni: proxy.example.com
+    headers:
+      X-Test: provider
+  - name: SOCKS
+    type: socks5
+    server: socks.example.com
+    port: 1080
+    username: socks-user
+    password: socks-pass
+    udp: false
+  - name: Snell
+    type: snell
+    server: snell.example.com
+    port: 44046
+    psk: snell-psk
+    version: 5
+    reuse: true
+    obfs-opts:
+      mode: http
+      host: bing.com
+  - name: Hysteria
+    type: hysteria
+    server: hy.example.com
+    port: 443
+    ports: 1000-2000
+    auth-str: hy-pass
+    up: 30 Mbps
+    down: 200 Mbps
+    hop-interval: 15
+    skip-cert-verify: true
+  - name: WireGuard
+    type: wireguard
+    server: 162.159.192.1
+    port: 2480
+    ip: 172.16.0.2
+    ipv6: fd01:5ca1:ab1e:80fa:ab85:6eea:213f:f4a5
+    public-key: Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo=
+    private-key: eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU=
+    reserved: U4An
+    persistent-keepalive: 25
+  - name: SSH
+    type: ssh
+    server: ssh.example.com
+    port: 22
+    username: root
+    password: ssh-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	wantOutbounds := []string{"HTTP", "SOCKS", "Snell", "Hysteria", "WireGuard", "SSH"}
+	if got := selectorOptions.Outbounds; len(got) != len(wantOutbounds) {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, wantOutbounds)
+	} else {
+		for index, want := range wantOutbounds {
+			if got[index] != want {
+				t.Fatalf("selector outbounds = %#v, want %#v", got, wantOutbounds)
+			}
+		}
+	}
+	if len(options.Endpoints) != 1 {
+		t.Fatalf("endpoint count = %d, want 1", len(options.Endpoints))
+	}
+	if options.Endpoints[0].Type != C.TypeWireGuard || options.Endpoints[0].Tag != "WireGuard" {
+		t.Fatalf("generated endpoint = %s/%s", options.Endpoints[0].Type, options.Endpoints[0].Tag)
+	}
+	wireGuardOptions := options.Endpoints[0].Options.(*option.WireGuardEndpointOptions)
+	if len(wireGuardOptions.Address) != 2 || len(wireGuardOptions.Peers) != 1 {
+		t.Fatalf("unexpected wireguard options: %#v", wireGuardOptions)
+	}
+	if len(wireGuardOptions.Peers[0].AllowedIPs) != 2 || len(wireGuardOptions.Peers[0].Reserved) != 3 {
+		t.Fatalf("unexpected wireguard peer: %#v", wireGuardOptions.Peers[0])
+	}
+	generatedByTag := make(map[string]option.Outbound)
+	for _, outbound := range options.Outbounds[1:] {
+		generatedByTag[outbound.Tag] = outbound
+	}
+	if generatedByTag["HTTP"].Type != C.TypeHTTP {
+		t.Fatalf("HTTP type = %s", generatedByTag["HTTP"].Type)
+	}
+	httpOptions := generatedByTag["HTTP"].Options.(*option.HTTPOutboundOptions)
+	if httpOptions.Username != "http-user" || httpOptions.TLS == nil || !httpOptions.TLS.Insecure || httpOptions.TLS.ServerName != "proxy.example.com" {
+		t.Fatalf("unexpected http options: %#v", httpOptions)
+	}
+	if got := httpOptions.Headers["X-Test"]; len(got) != 1 || got[0] != "provider" {
+		t.Fatalf("http header = %#v, want provider", got)
+	}
+	socksOptions := generatedByTag["SOCKS"].Options.(*option.SOCKSOutboundOptions)
+	if socksOptions.Network != option.NetworkList("tcp") || socksOptions.Username != "socks-user" {
+		t.Fatalf("unexpected socks options: %#v", socksOptions)
+	}
+	snellOptions := generatedByTag["Snell"].Options.(*option.SnellOutboundOptions)
+	if snellOptions.Version != 4 || snellOptions.ObfsOptions.ObfsMode != "http" || !snellOptions.Reuse {
+		t.Fatalf("unexpected snell options: %#v", snellOptions)
+	}
+	hysteriaOptions := generatedByTag["Hysteria"].Options.(*option.HysteriaOutboundOptions)
+	if hysteriaOptions.AuthString != "hy-pass" || hysteriaOptions.Up.Value() == 0 || hysteriaOptions.Down.Value() == 0 {
+		t.Fatalf("unexpected hysteria auth/bandwidth: %#v", hysteriaOptions)
+	}
+	if len(hysteriaOptions.ServerPorts) != 1 || hysteriaOptions.ServerPorts[0] != "1000:2000" {
+		t.Fatalf("hysteria server ports = %#v, want 1000:2000", hysteriaOptions.ServerPorts)
+	}
+	if hysteriaOptions.TLS == nil || len(hysteriaOptions.TLS.ALPN) != 1 || hysteriaOptions.TLS.ALPN[0] != "hysteria" {
+		t.Fatalf("unexpected hysteria tls: %#v", hysteriaOptions.TLS)
+	}
+	sshOptions := generatedByTag["SSH"].Options.(*option.SSHOutboundOptions)
+	if sshOptions.User != "root" || sshOptions.Password != "ssh-pass" {
+		t.Fatalf("unexpected ssh options: %#v", sshOptions)
+	}
+}
+
 func TestExpandConvertsTUICOptions(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
@@ -472,8 +607,8 @@ proxies:
     cipher: aes-128-gcm
     password: ss-pass
   - name: Shared
-    type: wireguard
-    server: wireguard.example.com
+    type: mieru
+    server: mieru.example.com
     port: 443
 `)
 	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}

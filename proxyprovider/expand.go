@@ -28,6 +28,7 @@ type subscriptionFile struct {
 type resolvedProvider struct {
 	proxies   []resolvedProxy
 	outbounds []option.Outbound
+	endpoints []option.Endpoint
 }
 
 type resolvedProxy struct {
@@ -79,6 +80,7 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 			return E.Cause(err, "proxy-provider ", name)
 		}
 		providers[name] = provider
+		options.Endpoints = append(options.Endpoints, provider.endpoints...)
 		options.Outbounds = append(options.Outbounds, provider.outbounds...)
 	}
 	for i := range options.Outbounds {
@@ -317,7 +319,7 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 		if !matchFilterValues(filter, true, rawName, displayName) || matchFilterValues(excludeFilter, false, rawName, displayName, name) || matchProxyType(excludeType, proxy) {
 			continue
 		}
-		outbound, err := convertProxy(provider, proxy, usedTags, domainResolver)
+		converted, err := convertProxy(provider, proxy, usedTags, domainResolver)
 		if err != nil {
 			var unsupported unsupportedProxyTypeError
 			if errors.As(err, &unsupported) {
@@ -327,14 +329,19 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 			return resolvedProvider{}, E.Cause(err, "proxy ", index, " [", rawName, "]")
 		}
 		resolved.proxies = append(resolved.proxies, resolvedProxy{
-			tag:          outbound.Tag,
+			tag:          converted.tag,
 			name:         rawName,
 			providerName: name,
-			proxyType:    stringValue(proxy, "type"),
+			proxyType:    converted.proxyType,
 		})
-		resolved.outbounds = append(resolved.outbounds, outbound)
+		if converted.endpoint != nil {
+			// WireGuard is an endpoint in current sing-box, but groups still select it by tag through OutboundManager.
+			resolved.endpoints = append(resolved.endpoints, *converted.endpoint)
+		} else if converted.outbound != nil {
+			resolved.outbounds = append(resolved.outbounds, *converted.outbound)
+		}
 	}
-	if len(resolved.outbounds) == 0 {
+	if len(resolved.outbounds) == 0 && len(resolved.endpoints) == 0 {
 		return resolvedProvider{}, E.New("subscription does not contain usable proxies")
 	}
 	return resolved, nil
@@ -656,16 +663,30 @@ func matchProxyTypeName(filters []*regexp.Regexp, proxyType string) bool {
 
 func proxyTypeName(proxyType string) string {
 	switch strings.ToLower(proxyType) {
+	case "http", "https":
+		return "HTTP"
+	case "socks", "socks5", "socks5h":
+		return "SOCKS"
 	case "ss", "shadowsocks":
 		return "Shadowsocks"
+	case "snell":
+		return "Snell"
 	case "vless":
 		return "VLESS"
 	case "vmess":
 		return "VMess"
 	case "trojan":
 		return "Trojan"
+	case "hysteria":
+		return "Hysteria"
 	case "hy2", "hysteria2":
 		return "Hysteria2"
+	case "tuic":
+		return "TUIC"
+	case "wireguard":
+		return "WireGuard"
+	case "ssh":
+		return "SSH"
 	case "anytls":
 		return "AnyTLS"
 	default:

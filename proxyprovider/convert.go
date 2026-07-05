@@ -1,7 +1,9 @@
 package proxyprovider
 
 import (
+	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,20 +28,37 @@ func (e unsupportedProxyTypeError) Error() string {
 	return "unsupported proxy type: " + e.proxyType
 }
 
-func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags map[string]bool, domainResolver string) (option.Outbound, error) {
+type convertedProxy struct {
+	tag       string
+	proxyType string
+	outbound  *option.Outbound
+	endpoint  *option.Endpoint
+}
+
+func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags map[string]bool, domainResolver string) (convertedProxy, error) {
 	rawName := stringValue(proxy, "name")
 	tag := provider.Override.AdditionalPrefix + rawName
 	proxyType := strings.ToLower(stringValue(proxy, "type"))
 	var (
 		outboundType    string
+		endpointType    string
 		outboundOptions any
 		converter       func() (any, error)
 		err             error
 	)
 	switch proxyType {
+	case "http", "https":
+		outboundType = C.TypeHTTP
+		converter = func() (any, error) { return convertHTTP(provider, proxy, domainResolver, proxyType == "https") }
+	case "socks", "socks5", "socks5h":
+		outboundType = C.TypeSOCKS
+		converter = func() (any, error) { return convertSOCKS(provider, proxy, domainResolver) }
 	case "ss", "shadowsocks":
 		outboundType = C.TypeShadowsocks
 		converter = func() (any, error) { return convertShadowsocks(provider, proxy, domainResolver) }
+	case "snell":
+		outboundType = C.TypeSnell
+		converter = func() (any, error) { return convertSnell(provider, proxy, domainResolver) }
 	case "vless":
 		outboundType = C.TypeVLESS
 		converter = func() (any, error) { return convertVLESS(provider, proxy, domainResolver) }
@@ -49,31 +68,86 @@ func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags 
 	case "trojan":
 		outboundType = C.TypeTrojan
 		converter = func() (any, error) { return convertTrojan(provider, proxy, domainResolver) }
+	case "hysteria":
+		outboundType = C.TypeHysteria
+		converter = func() (any, error) { return convertHysteria(provider, proxy, domainResolver) }
 	case "hy2", "hysteria2":
 		outboundType = C.TypeHysteria2
 		converter = func() (any, error) { return convertHysteria2(provider, proxy, domainResolver) }
 	case "tuic":
 		outboundType = C.TypeTUIC
 		converter = func() (any, error) { return convertTUIC(provider, proxy, domainResolver) }
+	case "wireguard":
+		endpointType = C.TypeWireGuard
+		converter = func() (any, error) { return convertWireGuard(provider, proxy, domainResolver) }
+	case "ssh":
+		outboundType = C.TypeSSH
+		converter = func() (any, error) { return convertSSH(provider, proxy, domainResolver) }
 	case "anytls":
 		outboundType = C.TypeAnyTLS
 		converter = func() (any, error) { return convertAnyTLS(provider, proxy, domainResolver) }
 	default:
-		return option.Outbound{}, unsupportedProxyTypeError{proxyType: proxyType}
+		return convertedProxy{}, unsupportedProxyTypeError{proxyType: proxyType}
 	}
 	if usedTags[tag] {
-		return option.Outbound{}, E.New("duplicate outbound tag: ", tag)
+		return convertedProxy{}, E.New("duplicate outbound tag: ", tag)
 	}
 	outboundOptions, err = converter()
 	if err != nil {
-		return option.Outbound{}, err
+		return convertedProxy{}, err
 	}
 	usedTags[tag] = true
-	return option.Outbound{
+	converted := convertedProxy{
+		tag:       tag,
+		proxyType: stringValue(proxy, "type"),
+	}
+	if endpointType != "" {
+		endpoint := option.Endpoint{
+			Type:    endpointType,
+			Tag:     tag,
+			Options: outboundOptions,
+		}
+		converted.endpoint = &endpoint
+		return converted, nil
+	}
+	outbound := option.Outbound{
 		Type:    outboundType,
 		Tag:     tag,
 		Options: outboundOptions,
-	}, nil
+	}
+	converted.outbound = &outbound
+	return converted, nil
+}
+
+func convertHTTP(provider option.ProxyProvider, proxy map[string]any, domainResolver string, defaultTLS bool) (*option.HTTPOutboundOptions, error) {
+	options := &option.HTTPOutboundOptions{
+		ServerOptions: serverOptions(proxy),
+		Username:      stringValue(proxy, "username", "user"),
+		Password:      stringValue(proxy, "password", "pass"),
+		Headers:       headerFromAny(firstValue(proxy, "headers")),
+	}
+	options.TLS = tlsOptions(proxy, provider.Override, defaultTLS)
+	if options.TLS != nil && options.TLS.UTLS != nil {
+		options.TLS.UTLS = nil
+	}
+	if path := stringValue(proxy, "path"); path != "" {
+		options.Path = path
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertSOCKS(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.SOCKSOutboundOptions, error) {
+	if enabled, loaded := boolValue(proxy, "tls"); loaded && enabled {
+		return nil, unsupportedProxyTypeError{proxyType: "socks5 tls"}
+	}
+	options := &option.SOCKSOutboundOptions{
+		ServerOptions: serverOptions(proxy),
+		Version:       "5",
+		Username:      stringValue(proxy, "username", "user"),
+		Password:      stringValue(proxy, "password", "pass"),
+		Network:       networkList(provider, proxy),
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }
 
 func convertShadowsocks(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.ShadowsocksOutboundOptions, error) {
@@ -92,6 +166,34 @@ func convertShadowsocks(provider option.ProxyProvider, proxy map[string]any, dom
 	}
 	if pluginOptions := pluginOptions(proxy); pluginOptions != "" {
 		options.PluginOptions = pluginOptions
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertSnell(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.SnellOutboundOptions, error) {
+	version := intValue(proxy, "version")
+	if version == 0 || version == 5 {
+		version = 4
+	}
+	if version != 4 && version != 6 {
+		return nil, unsupportedProxyTypeError{proxyType: fmt.Sprintf("snell v%d", version)}
+	}
+	options := &option.SnellOutboundOptions{
+		ServerOptions: serverOptions(proxy),
+		Version:       version,
+		PSK:           stringValue(proxy, "psk"),
+		Reuse:         boolValueDefault(proxy, "reuse"),
+		Network:       networkList(provider, proxy),
+	}
+	if userKey := stringValue(proxy, "userkey", "user-key", "user_key"); userKey != "" {
+		options.UserKey = userKey
+	}
+	obfsOptions := mapValue(proxy, "obfs-opts", "obfs_opts")
+	options.ObfsOptions.ObfsMode = stringValue(obfsOptions, "mode")
+	options.ObfsOptions.ObfsHost = stringValue(obfsOptions, "host")
+	options.V6Options.Mode = stringValue(proxy, "mode")
+	if options.PSK == "" {
+		return nil, E.New("missing psk")
 	}
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }
@@ -152,6 +254,69 @@ func convertTrojan(provider option.ProxyProvider, proxy map[string]any, domainRe
 	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if options.Password == "" {
 		return nil, E.New("missing password")
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertHysteria(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.HysteriaOutboundOptions, error) {
+	switch protocol := strings.ToLower(stringValue(proxy, "protocol")); protocol {
+	case "", "udp":
+	default:
+		return nil, unsupportedProxyTypeError{proxyType: "hysteria " + protocol}
+	}
+	options := &option.HysteriaOutboundOptions{
+		ServerOptions:       serverOptions(proxy),
+		ServerPorts:         hysteria2ServerPorts(proxy),
+		UpMbps:              intValue(proxy, "up-mbps", "up_mbps", "up-speed", "up_speed"),
+		DownMbps:            intValue(proxy, "down-mbps", "down_mbps", "down-speed", "down_speed"),
+		Obfs:                stringValue(proxy, "obfs"),
+		AuthString:          stringValue(proxy, "auth-str", "auth_str"),
+		Network:             networkList(provider, proxy),
+		ReceiveWindowConn:   uint64(intValue(proxy, "recv-window-conn", "recv_window_conn")),
+		ReceiveWindow:       uint64(intValue(proxy, "recv-window", "recv_window")),
+		DisableMTUDiscovery: boolValueDefault(proxy, "disable-mtu-discovery", "disable_mtu_discovery"),
+	}
+	var err error
+	options.Up, err = networkBytesFromAny(firstValue(proxy, "up"))
+	if err != nil {
+		return nil, E.Cause(err, "up")
+	}
+	options.Down, err = networkBytesFromAny(firstValue(proxy, "down"))
+	if err != nil {
+		return nil, E.Cause(err, "down")
+	}
+	if auth := stringValue(proxy, "auth"); auth != "" {
+		options.Auth, err = base64.StdEncoding.DecodeString(auth)
+		if err != nil {
+			return nil, E.Cause(err, "auth")
+		}
+	}
+	if hopInterval := intValue(proxy, "hop-interval", "hop_interval"); hopInterval > 0 {
+		options.HopInterval = badoption.Duration(time.Duration(hopInterval) * time.Second)
+	}
+	if receiveWindow := intValue(proxy, "recv-window-conn", "recv_window_conn"); receiveWindow > 0 {
+		streamReceiveWindow, windowErr := memoryBytesFromInt(receiveWindow)
+		if windowErr != nil {
+			return nil, E.Cause(windowErr, "recv-window-conn")
+		}
+		options.StreamReceiveWindow = streamReceiveWindow
+	}
+	if receiveWindow := intValue(proxy, "recv-window", "recv_window"); receiveWindow > 0 {
+		connectionReceiveWindow, windowErr := memoryBytesFromInt(receiveWindow)
+		if windowErr != nil {
+			return nil, E.Cause(windowErr, "recv-window")
+		}
+		options.ConnectionReceiveWindow = connectionReceiveWindow
+	}
+	if disableMTUDiscovery, loaded := boolValue(proxy, "disable-mtu-discovery", "disable_mtu_discovery"); loaded {
+		options.DisablePathMTUDiscovery = disableMTUDiscovery
+	}
+	options.TLS = tlsOptions(proxy, provider.Override, true)
+	if options.TLS != nil && len(options.TLS.ALPN) == 0 {
+		options.TLS.ALPN = badoption.Listable[string]{"hysteria"}
+	}
+	if options.AuthString == "" && len(options.Auth) == 0 {
+		return nil, E.New("missing auth-str")
 	}
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }
@@ -242,10 +407,80 @@ func convertTUIC(provider option.ProxyProvider, proxy map[string]any, domainReso
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }
 
+func convertWireGuard(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.WireGuardEndpointOptions, error) {
+	options := &option.WireGuardEndpointOptions{
+		System:     boolValueDefault(proxy, "system", "system-interface", "system_interface"),
+		Name:       stringValue(proxy, "interface-name", "interface_name"),
+		MTU:        uint32(intValue(proxy, "mtu")),
+		Address:    wireGuardAddresses(proxy),
+		PrivateKey: stringValue(proxy, "private-key", "private_key"),
+		ListenPort: uint16(intValue(proxy, "listen-port", "listen_port")),
+		Workers:    intValue(proxy, "workers"),
+	}
+	peers, err := wireGuardPeers(proxy, options.Address)
+	if err != nil {
+		return nil, err
+	}
+	options.Peers = peers
+	if options.PrivateKey == "" {
+		return nil, E.New("missing private-key")
+	}
+	if len(options.Address) == 0 {
+		return nil, E.New("missing local address")
+	}
+	if len(options.Peers) == 0 {
+		return nil, E.New("missing peer")
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertSSH(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.SSHOutboundOptions, error) {
+	options := &option.SSHOutboundOptions{
+		ServerOptions:        serverOptions(proxy),
+		User:                 stringValue(proxy, "username", "user"),
+		Password:             stringValue(proxy, "password"),
+		PrivateKey:           listableStringsFromAny(firstValue(proxy, "private-key", "private_key")),
+		PrivateKeyPath:       stringValue(proxy, "private-key-path", "private_key_path"),
+		PrivateKeyPassphrase: stringValue(proxy, "private-key-passphrase", "private_key_passphrase"),
+		HostKey:              listableStringsFromAny(firstValue(proxy, "host-key", "host_key")),
+		HostKeyAlgorithms:    listableStringsFromAny(firstValue(proxy, "host-key-algorithms", "host_key_algorithms")),
+		ClientVersion:        stringValue(proxy, "client-version", "client_version"),
+		Cipher:               listableStringsFromAny(firstValue(proxy, "cipher")),
+		MAC:                  listableStringsFromAny(firstValue(proxy, "mac")),
+		KexAlgorithm:         listableStringsFromAny(firstValue(proxy, "kex-algorithm", "kex_algorithm")),
+	}
+	if options.User == "" {
+		return nil, E.New("missing username")
+	}
+	if options.Password == "" && len(options.PrivateKey) == 0 && options.PrivateKeyPath == "" {
+		return nil, E.New("missing ssh authentication")
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
 func memoryBytesFromInt(value int) (byteformats.MemoryBytes, error) {
 	var result byteformats.MemoryBytes
 	err := result.UnmarshalJSON([]byte(strconv.Quote(strconv.Itoa(value) + " B")))
 	return result, err
+}
+
+func networkBytesFromAny(value any) (*byteformats.NetworkBytesCompat, error) {
+	if value == nil {
+		return nil, nil
+	}
+	rawValue := strings.TrimSpace(valueToString(value))
+	if rawValue == "" {
+		return nil, nil
+	}
+	if _, err := strconv.ParseFloat(rawValue, 64); err == nil {
+		rawValue += " Mbps"
+	}
+	var result byteformats.NetworkBytesCompat
+	err := result.UnmarshalJSON([]byte(strconv.Quote(rawValue)))
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func hysteria2ServerPorts(proxy map[string]any) badoption.Listable[string] {
@@ -257,6 +492,177 @@ func hysteria2ServerPorts(proxy map[string]any) badoption.Listable[string] {
 		values[index] = strings.ReplaceAll(value, "-", ":")
 	}
 	return badoption.Listable[string](values)
+}
+
+func wireGuardAddresses(proxy map[string]any) badoption.Listable[netip.Prefix] {
+	var addresses []netip.Prefix
+	addresses = append(addresses, wireGuardPrefixValues(firstValue(proxy, "address", "addresses", "local-address", "local_address"))...)
+	if ip := stringValue(proxy, "ip"); ip != "" {
+		addresses = append(addresses, wireGuardPrefixValue(ip, 32))
+	}
+	if ipv6 := stringValue(proxy, "ipv6"); ipv6 != "" {
+		addresses = append(addresses, wireGuardPrefixValue(ipv6, 128))
+	}
+	addresses = filterValidPrefixes(addresses)
+	if len(addresses) == 0 {
+		return nil
+	}
+	return badoption.Listable[netip.Prefix](addresses)
+}
+
+func wireGuardPeers(proxy map[string]any, localAddresses []netip.Prefix) ([]option.WireGuardPeer, error) {
+	defaultReserved, err := wireGuardReserved(firstValue(proxy, "reserved"))
+	if err != nil {
+		return nil, E.Cause(err, "reserved")
+	}
+	rawPeers := mapsFromAny(firstValue(proxy, "peers"))
+	if len(rawPeers) == 0 {
+		peer := option.WireGuardPeer{
+			Address:                     stringValue(proxy, "server"),
+			Port:                        uint16(intValue(proxy, "port", "server_port", "server-port")),
+			PublicKey:                   stringValue(proxy, "public-key", "public_key"),
+			PreSharedKey:                stringValue(proxy, "pre-shared-key", "pre_shared_key"),
+			AllowedIPs:                  wireGuardAllowedIPs(firstValue(proxy, "allowed-ips", "allowed_ips"), localAddresses),
+			PersistentKeepaliveInterval: uint16(intValue(proxy, "persistent-keepalive", "persistent_keepalive")),
+			Reserved:                    defaultReserved,
+		}
+		if peer.PublicKey == "" {
+			return nil, E.New("missing public-key")
+		}
+		return []option.WireGuardPeer{peer}, nil
+	}
+	peers := make([]option.WireGuardPeer, 0, len(rawPeers))
+	for index, rawPeer := range rawPeers {
+		reserved, reservedErr := wireGuardReserved(firstValue(rawPeer, "reserved"))
+		if reservedErr != nil {
+			return nil, E.Cause(reservedErr, "peer ", index, " reserved")
+		}
+		if len(reserved) == 0 {
+			reserved = defaultReserved
+		}
+		peer := option.WireGuardPeer{
+			Address:                     stringValue(rawPeer, "server", "address"),
+			Port:                        uint16(intValue(rawPeer, "port", "server_port", "server-port")),
+			PublicKey:                   stringValue(rawPeer, "public-key", "public_key"),
+			PreSharedKey:                stringValue(rawPeer, "pre-shared-key", "pre_shared_key"),
+			AllowedIPs:                  wireGuardAllowedIPs(firstValue(rawPeer, "allowed-ips", "allowed_ips"), nil),
+			PersistentKeepaliveInterval: uint16(intValue(rawPeer, "persistent-keepalive", "persistent_keepalive")),
+			Reserved:                    reserved,
+		}
+		if peer.PublicKey == "" {
+			return nil, E.New("missing public-key for peer ", index)
+		}
+		if len(peer.AllowedIPs) == 0 {
+			return nil, E.New("missing allowed-ips for peer ", index)
+		}
+		peers = append(peers, peer)
+	}
+	return peers, nil
+}
+
+func wireGuardAllowedIPs(value any, localAddresses []netip.Prefix) badoption.Listable[netip.Prefix] {
+	allowedIPs := wireGuardPrefixValues(value)
+	if len(allowedIPs) == 0 && len(localAddresses) > 0 {
+		for _, address := range localAddresses {
+			if address.Addr().Is4() {
+				allowedIPs = append(allowedIPs, netip.MustParsePrefix("0.0.0.0/0"))
+			} else if address.Addr().Is6() {
+				allowedIPs = append(allowedIPs, netip.MustParsePrefix("::/0"))
+			}
+		}
+	}
+	allowedIPs = filterValidPrefixes(allowedIPs)
+	if len(allowedIPs) == 0 {
+		return nil
+	}
+	return badoption.Listable[netip.Prefix](allowedIPs)
+}
+
+func wireGuardPrefixValues(value any) []netip.Prefix {
+	values := stringsFromAny(value)
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefixes = append(prefixes, wireGuardPrefixValue(value, 0))
+	}
+	return prefixes
+}
+
+func wireGuardPrefixValue(value string, defaultBits int) netip.Prefix {
+	if !strings.Contains(value, "/") {
+		addr, err := netip.ParseAddr(value)
+		if err != nil {
+			return netip.Prefix{}
+		}
+		if defaultBits == 0 {
+			defaultBits = addr.BitLen()
+		}
+		return netip.PrefixFrom(addr, defaultBits)
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return netip.Prefix{}
+	}
+	return prefix
+}
+
+func filterValidPrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	valid := prefixes[:0]
+	for _, prefix := range prefixes {
+		if prefix.IsValid() {
+			valid = append(valid, prefix)
+		}
+	}
+	return valid
+}
+
+func wireGuardReserved(value any) ([]uint8, error) {
+	switch typedValue := value.(type) {
+	case nil:
+		return nil, nil
+	case []uint8:
+		return typedValue, nil
+	case []int:
+		result := make([]uint8, 0, len(typedValue))
+		for _, item := range typedValue {
+			if item < 0 || item > 255 {
+				return nil, E.New("invalid byte value: ", item)
+			}
+			result = append(result, uint8(item))
+		}
+		return result, nil
+	case []any:
+		result := make([]uint8, 0, len(typedValue))
+		for _, item := range typedValue {
+			value := intValue(map[string]any{"value": item}, "value")
+			if value < 0 || value > 255 {
+				return nil, E.New("invalid byte value: ", item)
+			}
+			result = append(result, uint8(value))
+		}
+		return result, nil
+	case string:
+		if typedValue == "" {
+			return nil, nil
+		}
+		if decoded, err := base64.StdEncoding.DecodeString(typedValue); err == nil {
+			return decoded, nil
+		}
+		parts := strings.Split(typedValue, ",")
+		result := make([]uint8, 0, len(parts))
+		for _, part := range parts {
+			value, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil {
+				return nil, err
+			}
+			if value < 0 || value > 255 {
+				return nil, E.New("invalid byte value: ", value)
+			}
+			result = append(result, uint8(value))
+		}
+		return result, nil
+	default:
+		return nil, E.New("unsupported reserved value")
+	}
 }
 
 func convertAnyTLS(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.AnyTLSOutboundOptions, error) {
@@ -485,6 +891,11 @@ func boolValue(values map[string]any, keys ...string) (bool, bool) {
 	return false, false
 }
 
+func boolValueDefault(values map[string]any, keys ...string) bool {
+	value, _ := boolValue(values, keys...)
+	return value
+}
+
 func mapValue(values map[string]any, keys ...string) map[string]any {
 	value := firstValue(values, keys...)
 	switch typedValue := value.(type) {
@@ -497,6 +908,28 @@ func mapValue(values map[string]any, keys ...string) map[string]any {
 		}
 		return result
 	default:
+		return nil
+	}
+}
+
+func mapsFromAny(value any) []map[string]any {
+	switch typedValue := value.(type) {
+	case nil:
+		return nil
+	case []map[string]any:
+		return typedValue
+	case []any:
+		values := make([]map[string]any, 0, len(typedValue))
+		for _, item := range typedValue {
+			if mapped := mapFromAny(item); len(mapped) > 0 {
+				values = append(values, mapped)
+			}
+		}
+		return values
+	default:
+		if mapped := mapFromAny(value); len(mapped) > 0 {
+			return []map[string]any{mapped}
+		}
 		return nil
 	}
 }
