@@ -242,6 +242,13 @@ proxies:
     obfs-opts:
       mode: http
       host: bing.com
+  - name: Snell UDP
+    type: snell
+    server: snell-udp.example.com
+    port: 44046
+    psk: snell-udp-psk
+    version: 4
+    udp: true
   - name: Hysteria
     type: hysteria
     server: hy.example.com
@@ -285,7 +292,7 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	wantOutbounds := []string{"HTTP", "SOCKS", "Snell", "Hysteria", "WireGuard", "SSH"}
+	wantOutbounds := []string{"HTTP", "SOCKS", "Snell", "Snell UDP", "Hysteria", "WireGuard", "SSH"}
 	if got := selectorOptions.Outbounds; len(got) != len(wantOutbounds) {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, wantOutbounds)
 	} else {
@@ -327,8 +334,12 @@ proxies:
 		t.Fatalf("unexpected socks options: %#v", socksOptions)
 	}
 	snellOptions := generatedByTag["Snell"].Options.(*option.SnellOutboundOptions)
-	if snellOptions.Version != 4 || snellOptions.ObfsOptions.ObfsMode != "http" || !snellOptions.Reuse {
+	if snellOptions.Version != 4 || snellOptions.ObfsOptions.ObfsMode != "http" || !snellOptions.Reuse || snellOptions.Network != option.NetworkList("tcp") {
 		t.Fatalf("unexpected snell options: %#v", snellOptions)
+	}
+	snellUDPOptions := generatedByTag["Snell UDP"].Options.(*option.SnellOutboundOptions)
+	if snellUDPOptions.Network != "" {
+		t.Fatalf("snell udp network = %q, want default tcp+udp", snellUDPOptions.Network)
 	}
 	hysteriaOptions := generatedByTag["Hysteria"].Options.(*option.HysteriaOutboundOptions)
 	if hysteriaOptions.AuthString != "hy-pass" || hysteriaOptions.Up.Value() == 0 || hysteriaOptions.Down.Value() == 0 {

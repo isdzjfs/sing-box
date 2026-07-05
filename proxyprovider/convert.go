@@ -183,7 +183,7 @@ func convertSnell(provider option.ProxyProvider, proxy map[string]any, domainRes
 		Version:       version,
 		PSK:           stringValue(proxy, "psk"),
 		Reuse:         boolValueDefault(proxy, "reuse"),
-		Network:       networkList(provider, proxy),
+		Network:       snellNetworkList(provider, proxy),
 	}
 	if userKey := stringValue(proxy, "userkey", "user-key", "user_key"); userKey != "" {
 		options.UserKey = userKey
@@ -722,6 +722,18 @@ func networkList(provider option.ProxyProvider, proxy map[string]any) option.Net
 		hasUDP = true
 	}
 	if hasUDP && !udp {
+		return option.NetworkList(N.NetworkTCP)
+	}
+	return ""
+}
+
+func snellNetworkList(provider option.ProxyProvider, proxy map[string]any) option.NetworkList {
+	udp, hasUDP := boolValue(proxy, "udp")
+	if provider.Override.UDP != nil {
+		udp = *provider.Override.UDP
+		hasUDP = true
+	}
+	if !hasUDP || !udp {
 		return option.NetworkList(N.NetworkTCP)
 	}
 	return ""
