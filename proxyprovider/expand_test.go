@@ -105,14 +105,63 @@ proxies:
 	if vlessOptions.TLS == nil || !vlessOptions.TLS.Enabled || vlessOptions.TLS.ServerName != "vless.example.com" {
 		t.Fatalf("unexpected TLS options: %#v", vlessOptions.TLS)
 	}
-	if vlessOptions.TLS.Insecure {
-		t.Fatalf("tls insecure = true, want provider override to force false")
+	if !vlessOptions.TLS.Insecure {
+		t.Fatalf("tls insecure = false, want file provider to keep node setting")
 	}
 	if vlessOptions.Transport == nil || vlessOptions.Transport.Type != C.V2RayTransportTypeWebsocket {
 		t.Fatalf("unexpected transport: %#v", vlessOptions.Transport)
 	}
 	if vlessOptions.Transport.WebsocketOptions.Path != "/ws" {
 		t.Fatalf("ws path = %q", vlessOptions.Transport.WebsocketOptions.Path)
+	}
+}
+
+func TestExpandHTTPProviderDefaultsInsecure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`
+proxies:
+  - name: HK VLESS
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    tls: true
+    skip-cert-verify: true
+`))
+	}))
+	defer server.Close()
+	disableInsecure := false
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviderDefaults: &option.ProxyProvider{
+			Type: "http",
+			Override: option.ProxyProviderOverride{
+				Insecure: &disableInsecure,
+			},
+		},
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				URL:  server.URL,
+				Path: filepath.Join(t.TempDir(), "subscription.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"HK VLESS"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 2 {
+		t.Fatalf("outbound count = %d, want 2", len(options.Outbounds))
+	}
+	vlessOptions := options.Outbounds[1].Options.(*option.VLESSOutboundOptions)
+	if vlessOptions.TLS == nil || vlessOptions.TLS.Insecure {
+		t.Fatalf("unexpected TLS options: %#v", vlessOptions.TLS)
 	}
 }
 

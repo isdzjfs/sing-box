@@ -107,6 +107,7 @@ func providerDomainResolver(options *option.Options) string {
 }
 
 func mergeProxyProviderDefaults(defaults option.ProxyProvider, provider option.ProxyProvider) option.ProxyProvider {
+	skipDefaultInsecure := strings.EqualFold(provider.Type, "file")
 	if provider.Type == "" {
 		provider.Type = defaults.Type
 	}
@@ -133,6 +134,10 @@ func mergeProxyProviderDefaults(defaults option.ProxyProvider, provider option.P
 	}
 	if len(provider.Header) == 0 {
 		provider.Header = defaults.Header
+	}
+	// Manual file providers should keep each node's TLS verification setting.
+	if skipDefaultInsecure {
+		defaults.Override.Insecure = nil
 	}
 	provider.Override = mergeProxyProviderOverride(defaults.Override, provider.Override)
 	return provider
