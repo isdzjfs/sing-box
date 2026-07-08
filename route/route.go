@@ -307,6 +307,7 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 
 func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
 	ctx := log.ContextWithNewID(r.ctx)
+	metadata.PreMatch = true
 	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
 	packetDestination := metadata.Destination
 	if metadata.Destination.Addr.IsValid() && r.dnsTransport.FakeIP() != nil && r.dnsTransport.FakeIP().Store().Contains(metadata.Destination.Addr) {

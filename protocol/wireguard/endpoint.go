@@ -271,11 +271,11 @@ func (w *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	return packetConn, nil
 }
 
-func (w *Endpoint) PreferredDomain(domain string) bool {
+func (w *Endpoint) PreferredDomain(metadata *adapter.InboundContext, domain string) bool {
 	return false
 }
 
-func (w *Endpoint) PreferredAddress(address netip.Addr) bool {
+func (w *Endpoint) PreferredAddress(metadata *adapter.InboundContext, address netip.Addr) bool {
 	if !w.started.Load() {
 		return false
 	}

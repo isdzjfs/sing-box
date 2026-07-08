@@ -89,6 +89,7 @@ func (b *backendDarwin) start() error {
 		Logger:                    b.logger,
 		EXP_ExternalConfiguration: true,
 		EXP_MultiPendingPackets:   true,
+		EXP_SendMsgX:              true,
 	})
 	if err != nil {
 		return E.Cause(err, "create bridge tun")

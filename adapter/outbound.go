@@ -22,8 +22,8 @@ type Outbound interface {
 
 type OutboundWithPreferredRoutes interface {
 	Outbound
-	PreferredDomain(domain string) bool
-	PreferredAddress(address netip.Addr) bool
+	PreferredDomain(metadata *InboundContext, domain string) bool
+	PreferredAddress(metadata *InboundContext, address netip.Addr) bool
 }
 
 type FlowOutbound interface {

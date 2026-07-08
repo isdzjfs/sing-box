@@ -65,12 +65,12 @@ func (o *Outbound) Close() error {
 	return o.backend.Close()
 }
 
-func (o *Outbound) PreferredDomain(domain string) bool {
+func (o *Outbound) PreferredDomain(metadata *adapter.InboundContext, domain string) bool {
 	return false
 }
 
-func (o *Outbound) PreferredAddress(address netip.Addr) bool {
-	return !o.isLocalDestination(address)
+func (o *Outbound) PreferredAddress(metadata *adapter.InboundContext, address netip.Addr) bool {
+	return metadata.PreMatch && !o.isLocalDestination(address)
 }
 
 func (o *Outbound) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
@@ -108,6 +108,13 @@ func (o *Outbound) PortAddresses() (netip.Addr, netip.Addr) {
 
 func (o *Outbound) PortMTU() uint32 {
 	return o.backend.PortMTU()
+}
+
+func (o *Outbound) PortSelectorRange() (uint16, uint16) {
+	if rangedBackend, isRanged := o.backend.(tun.PortWithSelectorRange); isRanged {
+		return rangedBackend.PortSelectorRange()
+	}
+	return 0, 0
 }
 
 func (o *Outbound) AttachReturn(returnPath tun.Return) error {
