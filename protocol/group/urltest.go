@@ -98,6 +98,12 @@ func (s *URLTest) Now() string {
 	} else if s.group.selectedOutboundUDP != nil {
 		return s.group.selectedOutboundUDP.Tag()
 	}
+	if outbound, _ := s.group.Select(N.NetworkTCP); outbound != nil {
+		return outbound.Tag()
+	}
+	if outbound, _ := s.group.Select(N.NetworkUDP); outbound != nil {
+		return outbound.Tag()
+	}
 	return ""
 }
 

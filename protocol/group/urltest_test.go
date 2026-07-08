@@ -97,6 +97,44 @@ func TestURLTestGroupSkipsSharedOutboundRecentlyCheckedByAnotherGroup(t *testing
 	require.Equal(t, uint16(0), histories[1].Delay)
 }
 
+func TestURLTestNowFallsBackToFirstSupportedOutboundBeforeSelection(t *testing.T) {
+	ctx := newTestURLTestContext()
+	firstOutbound := &testURLTestOutbound{tag: "first"}
+	secondOutbound := &testURLTestOutbound{tag: "second"}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{firstOutbound, secondOutbound}, "", time.Minute, 0, time.Minute, false)
+	require.NoError(t, err)
+	outbound := &URLTest{group: group}
+
+	require.Equal(t, "first", outbound.Now())
+	require.Nil(t, group.selectedOutboundTCP)
+	require.Nil(t, group.selectedOutboundUDP)
+}
+
+func TestURLTestNowFallsBackToHistoryBestOutboundBeforeSelection(t *testing.T) {
+	ctx := context.Background()
+	history := urltest.NewHistoryStorage()
+	ctx = service.ContextWithPtr(ctx, history)
+	ctx = pause.WithDefaultManager(ctx)
+	slowOutbound := &testURLTestOutbound{tag: "slow"}
+	fastOutbound := &testURLTestOutbound{tag: "fast"}
+	checkedAt := time.Unix(1000, 0)
+	history.StoreURLTestHistory("slow", &adapter.URLTestHistory{
+		Time:  checkedAt,
+		Delay: 100,
+	})
+	history.StoreURLTestHistory("fast", &adapter.URLTestHistory{
+		Time:  checkedAt,
+		Delay: 10,
+	})
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{slowOutbound, fastOutbound}, "", time.Minute, 0, time.Minute, false)
+	require.NoError(t, err)
+	outbound := &URLTest{group: group}
+
+	require.Equal(t, "fast", outbound.Now())
+	require.Nil(t, group.selectedOutboundTCP)
+	require.Nil(t, group.selectedOutboundUDP)
+}
+
 func newTestURLTestGroup(t *testing.T, interval time.Duration, idleTimeout time.Duration) *URLTestGroup {
 	t.Helper()
 
