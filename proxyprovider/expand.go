@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -40,6 +41,20 @@ type resolvedProxy struct {
 
 type providerContentUnavailable struct {
 	err error
+}
+
+type providerContentSource uint8
+
+const (
+	providerContentSourceFile providerContentSource = iota
+	providerContentSourceCache
+	providerContentSourceFetched
+)
+
+type providerContent struct {
+	content   []byte
+	cachePath string
+	source    providerContentSource
 }
 
 func (e providerContentUnavailable) Error() string {
@@ -72,7 +87,7 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 		if err != nil {
 			var unavailable providerContentUnavailable
 			if errors.As(err, &unavailable) {
-				logger.Warn("fetch proxy-provider ", name, " failed without cached content, skipping: ", unavailable.err)
+				logger.Warn("proxy-provider ", name, " unavailable without usable cached content, skipping: ", unavailable.err)
 				providers[name] = resolvedProvider{}
 				hasUnavailableProvider = true
 				continue
@@ -291,16 +306,13 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 			provider.Type = "file"
 		}
 	}
-	content, err := loadProviderContent(ctx, logger, name, provider)
+	loadedContent, err := loadProviderContent(ctx, logger, name, provider)
 	if err != nil {
 		return resolvedProvider{}, err
 	}
-	subscription, err := parseSubscription(content)
+	subscription, err := resolveProviderSubscription(ctx, logger, name, provider, loadedContent)
 	if err != nil {
 		return resolvedProvider{}, err
-	}
-	if len(subscription.Proxies) == 0 {
-		return resolvedProvider{}, E.New("subscription does not contain proxies")
 	}
 	filter, err := compileProviderFilter(provider.Filter)
 	if err != nil {
@@ -350,6 +362,60 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 		return resolvedProvider{}, E.New("subscription does not contain usable proxies")
 	}
 	return resolved, nil
+}
+
+func resolveProviderSubscription(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider, loaded providerContent) (subscriptionFile, error) {
+	subscription, err := parseNonEmptySubscription(loaded.content)
+	if err == nil {
+		if loaded.source == providerContentSourceFetched {
+			saveProviderCache(logger, name, loaded.cachePath, loaded.content)
+		}
+		return subscription, nil
+	}
+	if !strings.EqualFold(provider.Type, "http") {
+		return subscriptionFile{}, err
+	}
+	switch loaded.source {
+	case providerContentSourceFetched:
+		cached, readErr := os.ReadFile(loaded.cachePath)
+		if readErr != nil {
+			return subscriptionFile{}, providerContentUnavailable{err: err}
+		}
+		cachedSubscription, cachedErr := parseNonEmptySubscription(cached)
+		if cachedErr != nil {
+			logger.Warn("fetch proxy-provider ", name, " returned unusable content and cached content is unusable: ", cachedErr)
+			return subscriptionFile{}, providerContentUnavailable{err: err}
+		}
+		logger.Warn("fetch proxy-provider ", name, " returned unusable content, using cached content: ", err)
+		return cachedSubscription, nil
+	case providerContentSourceCache:
+		fetched, fetchErr := fetchProviderContent(ctx, provider)
+		if fetchErr != nil {
+			logger.Warn("cached proxy-provider ", name, " content is unusable and refetch failed: ", fetchErr)
+			return subscriptionFile{}, providerContentUnavailable{err: err}
+		}
+		fetchedSubscription, fetchedErr := parseNonEmptySubscription(fetched)
+		if fetchedErr != nil {
+			logger.Warn("cached proxy-provider ", name, " content is unusable and refetched content is unusable: ", fetchedErr)
+			return subscriptionFile{}, providerContentUnavailable{err: err}
+		}
+		logger.Warn("cached proxy-provider ", name, " content is unusable, using refetched content: ", err)
+		saveProviderCache(logger, name, loaded.cachePath, fetched)
+		return fetchedSubscription, nil
+	default:
+		return subscriptionFile{}, providerContentUnavailable{err: err}
+	}
+}
+
+func parseNonEmptySubscription(content []byte) (subscriptionFile, error) {
+	subscription, err := parseSubscription(content)
+	if err != nil {
+		return subscriptionFile{}, err
+	}
+	if len(subscription.Proxies) == 0 {
+		return subscriptionFile{}, E.New("subscription does not contain proxies")
+	}
+	return subscription, nil
 }
 
 func parseSubscription(content []byte) (subscriptionFile, error) {
@@ -477,6 +543,13 @@ func copyQueryValue(proxy map[string]any, query url.Values, queryKey string, pro
 
 func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Options, hasUnavailableProvider bool) {
 	availableTags := existingOutboundTags(options)
+	var emptyGroupFallbackTag string
+	ensureEmptyGroupFallback := func() string {
+		if emptyGroupFallbackTag == "" {
+			emptyGroupFallbackTag = addEmptyGroupFallback(options, availableTags)
+		}
+		return emptyGroupFallbackTag
+	}
 	for i := range options.Outbounds {
 		switch options.Outbounds[i].Type {
 		case "selector":
@@ -485,6 +558,11 @@ func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Opt
 				continue
 			}
 			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider)
+			if len(groupOptions.Outbounds) == 0 {
+				fallbackTag := ensureEmptyGroupFallback()
+				logger.Warn("outbound group ", options.Outbounds[i].Tag, " has no members after proxy-provider expansion, using block fallback: ", fallbackTag)
+				groupOptions.Outbounds = []string{fallbackTag}
+			}
 			if groupOptions.Default != "" && !availableTags[groupOptions.Default] {
 				logger.Warn("outbound group ", options.Outbounds[i].Tag, " default outbound unavailable, clearing: ", groupOptions.Default)
 				groupOptions.Default = ""
@@ -495,8 +573,28 @@ func pruneMissingGroupDependencies(logger log.ContextLogger, options *option.Opt
 				continue
 			}
 			groupOptions.Outbounds = pruneMissingOutbounds(logger, options.Outbounds[i].Tag, groupOptions.Outbounds, availableTags, hasUnavailableProvider)
+			if len(groupOptions.Outbounds) == 0 {
+				fallbackTag := ensureEmptyGroupFallback()
+				logger.Warn("outbound group ", options.Outbounds[i].Tag, " has no members after proxy-provider expansion, using block fallback: ", fallbackTag)
+				groupOptions.Outbounds = []string{fallbackTag}
+			}
 		}
 	}
+}
+
+func addEmptyGroupFallback(options *option.Options, availableTags map[string]bool) string {
+	const fallbackBaseTag = "empty-outbound-group"
+	fallbackTag := fallbackBaseTag
+	for index := 1; availableTags[fallbackTag]; index++ {
+		fallbackTag = fallbackBaseTag + "-" + stringIndex(index)
+	}
+	options.Outbounds = append(options.Outbounds, option.Outbound{
+		Type:    C.TypeBlock,
+		Tag:     fallbackTag,
+		Options: &option.StubOptions{},
+	})
+	availableTags[fallbackTag] = true
+	return fallbackTag
 }
 
 func pruneMissingOutbounds(logger log.ContextLogger, groupTag string, outbounds []string, availableTags map[string]bool, hasUnavailableProvider bool) []string {
@@ -518,16 +616,17 @@ func pruneMissingOutbounds(logger log.ContextLogger, groupTag string, outbounds 
 	return pruned
 }
 
-func loadProviderContent(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider) ([]byte, error) {
+func loadProviderContent(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider) (providerContent, error) {
 	switch strings.ToLower(provider.Type) {
 	case "file":
 		if provider.Path == "" {
-			return nil, E.New("missing path")
+			return providerContent{}, E.New("missing path")
 		}
-		return os.ReadFile(filemanager.BasePath(ctx, provider.Path))
+		content, err := os.ReadFile(filemanager.BasePath(ctx, provider.Path))
+		return providerContent{content: content, source: providerContentSourceFile}, err
 	case "http":
 		if provider.URL == "" {
-			return nil, E.New("missing url")
+			return providerContent{}, E.New("missing url")
 		}
 		cachePath := provider.Path
 		if cachePath == "" {
@@ -537,40 +636,32 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 		if provider.Interval > 0 {
 			if stat, err := os.Stat(cachePath); err == nil && time.Since(stat.ModTime()) < time.Duration(provider.Interval)*time.Second {
 				if cached, readErr := os.ReadFile(cachePath); readErr == nil {
-					return cached, nil
+					return providerContent{content: cached, cachePath: cachePath, source: providerContentSourceCache}, nil
 				} else {
 					logger.Warn("read fresh proxy-provider ", name, " cache: ", readErr)
 				}
 			}
 		}
-		providerProxy := strings.TrimSpace(provider.Proxy)
-		if providerProxy != "" && !isDirectProviderProxy(providerProxy) {
-			err := E.New("proxy-provider proxy detour is not supported yet: ", providerProxy)
-			if cached, readErr := os.ReadFile(cachePath); readErr == nil {
-				logger.Warn("fetch proxy-provider ", name, " skipped, using cached content: ", err)
-				return cached, nil
-			}
-			return nil, providerContentUnavailable{err: err}
-		}
-		content, err := fetchProvider(ctx, provider)
+		content, err := fetchProviderContent(ctx, provider)
 		if err != nil {
 			if cached, readErr := os.ReadFile(cachePath); readErr == nil {
 				logger.Warn("fetch proxy-provider ", name, " failed, using cached content: ", err)
-				return cached, nil
+				return providerContent{content: cached, cachePath: cachePath, source: providerContentSourceCache}, nil
 			}
-			return nil, providerContentUnavailable{err: err}
+			return providerContent{}, providerContentUnavailable{err: err}
 		}
-		if err = os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
-			if writeErr := os.WriteFile(cachePath, content, 0o644); writeErr != nil {
-				logger.Warn("save proxy-provider ", name, " cache: ", writeErr)
-			}
-		} else {
-			logger.Warn("create proxy-provider ", name, " cache directory: ", err)
-		}
-		return content, nil
+		return providerContent{content: content, cachePath: cachePath, source: providerContentSourceFetched}, nil
 	default:
-		return nil, E.New("unsupported provider type: ", provider.Type)
+		return providerContent{}, E.New("unsupported provider type: ", provider.Type)
 	}
+}
+
+func fetchProviderContent(ctx context.Context, provider option.ProxyProvider) ([]byte, error) {
+	providerProxy := strings.TrimSpace(provider.Proxy)
+	if providerProxy != "" && !isDirectProviderProxy(providerProxy) {
+		return nil, E.New("proxy-provider proxy detour is not supported yet: ", providerProxy)
+	}
+	return fetchProvider(ctx, provider)
 }
 
 func fetchProvider(ctx context.Context, provider option.ProxyProvider) ([]byte, error) {
@@ -593,6 +684,19 @@ func fetchProvider(ctx context.Context, provider option.ProxyProvider) ([]byte, 
 		return nil, E.New("unexpected status: ", response.Status)
 	}
 	return readAllLimited(response.Body, 16<<20)
+}
+
+func saveProviderCache(logger log.ContextLogger, name string, cachePath string, content []byte) {
+	if cachePath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
+		if writeErr := os.WriteFile(cachePath, content, 0o644); writeErr != nil {
+			logger.Warn("save proxy-provider ", name, " cache: ", writeErr)
+		}
+	} else {
+		logger.Warn("create proxy-provider ", name, " cache directory: ", err)
+	}
 }
 
 func compileProviderFilter(pattern string) ([]*regexp.Regexp, error) {

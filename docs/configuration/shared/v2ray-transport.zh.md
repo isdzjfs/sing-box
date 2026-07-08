@@ -15,6 +15,7 @@ V2Ray Transport 是 v2ray 发明的一组私有协议，并污染了其他协议
 * QUIC
 * gRPC
 * HTTPUpgrade
+* XHTTP
 
 !!! warning "与 v2ray-core 的区别"
 
@@ -216,3 +217,83 @@ HTTP 请求路径
 HTTP 请求的额外标头。
 
 如果设置，服务器将写入响应。
+
+### XHTTP
+
+```json
+{
+  "type": "xhttp",
+  "host": "",
+  "path": "",
+  "mode": "auto",
+  "headers": {},
+  "x_padding_bytes": {
+    "from": 100,
+    "to": 1000
+  },
+  "xmux": {},
+  "download_settings": {
+    "server": "",
+    "server_port": 443,
+    "tls": {},
+    "transport": {
+      "type": "xhttp",
+      "path": ""
+    }
+  }
+}
+```
+
+`"splithttp"` 也可作为别名。
+
+!!! note
+
+    HTTP/3 需要使用 `with_quic` 标签构建，并在 TLS ALPN 中设置 `h3`。
+
+    为兼容 Xray，也接受 camelCase 字段、`extra.xmux` 和 `extra.downloadSettings`。
+
+#### host
+
+作为 HTTP authority 使用的主机域名。
+
+客户端仍然拨号到出站服务器地址。
+
+#### path
+
+HTTP 请求路径。
+
+服务器将按前缀验证。
+
+#### mode
+
+`auto`、`packet-up`、`stream-up`、`stream-one` 之一。
+
+在 `auto` 模式下，REALITY over HTTP/2 使用 `stream-one`；REALITY 且设置 `download_settings` 时使用 `stream-up`；其他情况使用 `packet-up`。
+
+#### headers
+
+HTTP 请求的额外标头。
+
+这里不允许设置 `Host`，请改用 `host`。
+
+#### x_padding_bytes
+
+XHTTP padding 大小范围。
+
+为了兼容，也接受 `"100-1000"` 这种字符串形式。
+
+#### xmux
+
+XHTTP 连接复用设置。
+
+如果省略，将使用与 Xray 兼容的默认值：`max_connections` 为 `6`，`h_max_request_times` 为 `600-900`，`h_max_reusable_secs` 为 `1800-3000`。
+
+`max_connections` 和 `max_concurrency` 不能同时设置。
+
+#### download_settings
+
+可选的下行传输设置。
+
+设置后，下行 stream 会使用这里的目标、TLS 和 XHTTP 传输；上行仍使用主传输。
+
+未设置的字段继承自主传输。

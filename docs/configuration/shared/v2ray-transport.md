@@ -16,6 +16,7 @@ Available transports:
 * QUIC
 * gRPC
 * HTTPUpgrade
+* XHTTP
 
 !!! warning "Difference from v2ray-core"
 
@@ -227,3 +228,83 @@ The server will verify.
 Extra headers of HTTP request.
 
 The server will write in response if not empty.
+
+### XHTTP
+
+```json
+{
+  "type": "xhttp",
+  "host": "",
+  "path": "",
+  "mode": "auto",
+  "headers": {},
+  "x_padding_bytes": {
+    "from": 100,
+    "to": 1000
+  },
+  "xmux": {},
+  "download_settings": {
+    "server": "",
+    "server_port": 443,
+    "tls": {},
+    "transport": {
+      "type": "xhttp",
+      "path": ""
+    }
+  }
+}
+```
+
+`"splithttp"` is accepted as an alias.
+
+!!! note
+
+    HTTP/3 is available when sing-box is built with the `with_quic` tag and TLS ALPN is set to `h3`.
+
+    Xray-style camelCase fields, `extra.xmux` and `extra.downloadSettings` are accepted for compatibility.
+
+#### host
+
+Host domain used as the HTTP authority.
+
+The client still dials the outbound server address.
+
+#### path
+
+Path of HTTP request.
+
+The server will verify by prefix.
+
+#### mode
+
+One of `auto`, `packet-up`, `stream-up`, `stream-one`.
+
+In `auto` mode, REALITY over HTTP/2 uses `stream-one`; REALITY with `download_settings` uses `stream-up`; other cases use `packet-up`.
+
+#### headers
+
+Extra headers of HTTP request.
+
+`Host` is not allowed here, use `host` instead.
+
+#### x_padding_bytes
+
+XHTTP padding size range.
+
+It also accepts the string form `"100-1000"` for compatibility.
+
+#### xmux
+
+XHTTP connection reuse settings.
+
+If omitted, Xray-compatible defaults are used: `max_connections` is `6`, `h_max_request_times` is `600-900`, and `h_max_reusable_secs` is `1800-3000`.
+
+`max_connections` and `max_concurrency` cannot be set together.
+
+#### download_settings
+
+Optional downlink transport settings.
+
+When set, the download stream is opened with this target, TLS and XHTTP transport while uploads keep using the main transport.
+
+Unset fields inherit from the main transport.

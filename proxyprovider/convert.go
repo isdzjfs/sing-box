@@ -2,6 +2,7 @@ package proxyprovider
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -199,12 +200,16 @@ func convertSnell(provider option.ProxyProvider, proxy map[string]any, domainRes
 }
 
 func convertVLESS(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.VLESSOutboundOptions, error) {
+	transport, err := v2rayTransportOptions(proxy)
+	if err != nil {
+		return nil, err
+	}
 	options := &option.VLESSOutboundOptions{
 		ServerOptions: serverOptions(proxy),
 		UUID:          stringValue(proxy, "uuid"),
 		Flow:          stringValue(proxy, "flow"),
 		Network:       networkList(provider, proxy),
-		Transport:     v2rayTransportOptions(proxy),
+		Transport:     transport,
 	}
 	options.TLS = tlsOptions(proxy, provider.Override, false)
 	if options.UUID == "" {
@@ -217,13 +222,17 @@ func convertVLESS(provider option.ProxyProvider, proxy map[string]any, domainRes
 }
 
 func convertVMess(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.VMessOutboundOptions, error) {
+	transport, err := v2rayTransportOptions(proxy)
+	if err != nil {
+		return nil, err
+	}
 	options := &option.VMessOutboundOptions{
 		ServerOptions: serverOptions(proxy),
 		UUID:          stringValue(proxy, "uuid"),
 		Security:      stringValue(proxy, "security", "cipher"),
 		AlterId:       intValue(proxy, "alterId", "alter-id", "alter_id", "aid"),
 		Network:       networkList(provider, proxy),
-		Transport:     v2rayTransportOptions(proxy),
+		Transport:     transport,
 	}
 	options.TLS = tlsOptions(proxy, provider.Override, false)
 	if options.UUID == "" {
@@ -245,11 +254,15 @@ func convertVMess(provider option.ProxyProvider, proxy map[string]any, domainRes
 }
 
 func convertTrojan(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.TrojanOutboundOptions, error) {
+	transport, err := v2rayTransportOptions(proxy)
+	if err != nil {
+		return nil, err
+	}
 	options := &option.TrojanOutboundOptions{
 		ServerOptions: serverOptions(proxy),
 		Password:      stringValue(proxy, "password"),
 		Network:       networkList(provider, proxy),
-		Transport:     v2rayTransportOptions(proxy),
+		Transport:     transport,
 	}
 	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if options.Password == "" {
@@ -777,8 +790,9 @@ func hasTLSFields(proxy map[string]any) bool {
 		len(listableStringsFromAny(firstValue(proxy, "alpn"))) > 0
 }
 
-func v2rayTransportOptions(proxy map[string]any) *option.V2RayTransportOptions {
-	switch strings.ToLower(stringValue(proxy, "network")) {
+func v2rayTransportOptions(proxy map[string]any) (*option.V2RayTransportOptions, error) {
+	network := strings.ToLower(stringValue(proxy, "network"))
+	switch network {
 	case "ws", "websocket":
 		wsOptions := mapValue(proxy, "ws-opts", "ws_opts")
 		return &option.V2RayTransportOptions{
@@ -789,7 +803,7 @@ func v2rayTransportOptions(proxy map[string]any) *option.V2RayTransportOptions {
 				MaxEarlyData:        uint32(intValue(wsOptions, "max-early-data", "max_early_data")),
 				EarlyDataHeaderName: stringValue(wsOptions, "early-data-header-name", "early_data_header_name"),
 			},
-		}
+		}, nil
 	case "grpc":
 		grpcOptions := mapValue(proxy, "grpc-opts", "grpc_opts")
 		return &option.V2RayTransportOptions{
@@ -797,7 +811,7 @@ func v2rayTransportOptions(proxy map[string]any) *option.V2RayTransportOptions {
 			GRPCOptions: option.V2RayGRPCOptions{
 				ServiceName: stringValue(grpcOptions, "grpc-service-name", "serviceName", "service_name"),
 			},
-		}
+		}, nil
 	case "http", "h2":
 		httpOptions := mapValue(proxy, "h2-opts", "h2_opts", "http-opts", "http_opts")
 		return &option.V2RayTransportOptions{
@@ -807,10 +821,73 @@ func v2rayTransportOptions(proxy map[string]any) *option.V2RayTransportOptions {
 				Path:    stringValue(httpOptions, "path"),
 				Headers: headerFromAny(firstValue(httpOptions, "headers")),
 			},
+		}, nil
+	case "xhttp", "splithttp":
+		xhttpOptions, err := v2rayXHTTPOptions(proxy, network)
+		if err != nil {
+			return nil, err
 		}
+		transportType := C.V2RayTransportTypeXHTTP
+		if network == "splithttp" {
+			transportType = C.V2RayTransportTypeSplitHTTP
+		}
+		return &option.V2RayTransportOptions{
+			Type:         transportType,
+			XHTTPOptions: xhttpOptions,
+		}, nil
 	default:
-		return nil
+		return nil, nil
 	}
+}
+
+func v2rayXHTTPOptions(proxy map[string]any, network string) (option.V2RayXHTTPOptions, error) {
+	rawOptions := mapValue(proxy,
+		network+"-opts", network+"_opts",
+		"xhttp-opts", "xhttp_opts",
+		"splithttp-opts", "splithttp_opts",
+	)
+	var options option.V2RayXHTTPOptions
+	if len(rawOptions) > 0 {
+		jsonOptions := make(map[string]any, len(rawOptions))
+		for key, value := range rawOptions {
+			if key == "headers" {
+				continue
+			}
+			jsonOptions[key] = value
+		}
+		content, err := json.Marshal(jsonOptions)
+		if err != nil {
+			return options, err
+		}
+		if err = json.Unmarshal(content, &options); err != nil {
+			return options, err
+		}
+	}
+	if options.Host == "" {
+		options.Host = stringValue(rawOptions, "host")
+		if options.Host == "" {
+			options.Host = stringValue(proxy, "host")
+		}
+	}
+	if options.Path == "" {
+		options.Path = stringValue(rawOptions, "path")
+		if options.Path == "" {
+			options.Path = stringValue(proxy, "path")
+		}
+	}
+	if options.Mode == "" {
+		options.Mode = stringValue(rawOptions, "mode")
+		if options.Mode == "" {
+			options.Mode = stringValue(proxy, "mode")
+		}
+	}
+	if len(options.Headers) == 0 {
+		options.Headers = headerFromAny(firstValue(rawOptions, "headers"))
+		if len(options.Headers) == 0 {
+			options.Headers = headerFromAny(firstValue(proxy, "headers"))
+		}
+	}
+	return options, nil
 }
 
 func pluginOptions(proxy map[string]any) string {

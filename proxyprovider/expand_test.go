@@ -406,6 +406,92 @@ proxies:
 	}
 }
 
+func TestExpandConvertsXHTTPTransports(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: XHTTP VLESS
+    type: vless
+    server: xhttp.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000004
+    udp: true
+    tls: true
+    servername: www.cloudflare.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: public-key
+      short-id: short-id
+    network: xhttp
+    xhttp-opts:
+      host: cdn.example.com
+      path: /xhttp
+      mode: stream-up
+      headers:
+        X-Test: provider
+      x-padding-bytes: 100-200
+  - name: SplitHTTP Trojan
+    type: trojan
+    server: split.example.com
+    port: 443
+    password: split-pass
+    network: splithttp
+    splithttp-opts:
+      path: /split
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"XHTTP VLESS", "SplitHTTP Trojan"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	vlessOptions := options.Outbounds[1].Options.(*option.VLESSOutboundOptions)
+	if vlessOptions.Transport == nil || vlessOptions.Transport.Type != C.V2RayTransportTypeXHTTP {
+		t.Fatalf("vless transport = %#v, want xhttp", vlessOptions.Transport)
+	}
+	xhttpOptions := vlessOptions.Transport.XHTTPOptions
+	if xhttpOptions.Host != "cdn.example.com" || xhttpOptions.Path != "/xhttp" || xhttpOptions.Mode != "stream-up" {
+		t.Fatalf("unexpected xhttp options: %#v", xhttpOptions)
+	}
+	if vlessOptions.Network != "" {
+		t.Fatalf("vless network = %q, want default tcp+udp", vlessOptions.Network)
+	}
+	if vlessOptions.TLS == nil || vlessOptions.TLS.ServerName != "www.cloudflare.com" {
+		t.Fatalf("unexpected vless tls: %#v", vlessOptions.TLS)
+	}
+	if vlessOptions.TLS.UTLS == nil || vlessOptions.TLS.UTLS.Fingerprint != "chrome" {
+		t.Fatalf("unexpected vless utls: %#v", vlessOptions.TLS.UTLS)
+	}
+	if vlessOptions.TLS.Reality == nil || vlessOptions.TLS.Reality.PublicKey != "public-key" || vlessOptions.TLS.Reality.ShortID != "short-id" {
+		t.Fatalf("unexpected vless reality: %#v", vlessOptions.TLS.Reality)
+	}
+	if got := xhttpOptions.Headers["X-Test"]; len(got) != 1 || got[0] != "provider" {
+		t.Fatalf("xhttp header = %#v, want provider", got)
+	}
+	if xhttpOptions.XPaddingBytes == nil || xhttpOptions.XPaddingBytes.From != 100 || xhttpOptions.XPaddingBytes.To != 200 {
+		t.Fatalf("xhttp padding = %#v, want 100-200", xhttpOptions.XPaddingBytes)
+	}
+	trojanOptions := options.Outbounds[2].Options.(*option.TrojanOutboundOptions)
+	if trojanOptions.Transport == nil || trojanOptions.Transport.Type != C.V2RayTransportTypeSplitHTTP {
+		t.Fatalf("trojan transport = %#v, want splithttp", trojanOptions.Transport)
+	}
+	if trojanOptions.Transport.XHTTPOptions.Path != "/split" {
+		t.Fatalf("splithttp path = %q, want /split", trojanOptions.Transport.XHTTPOptions.Path)
+	}
+}
+
 func TestExpandConvertsTUICOptions(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
@@ -864,7 +950,7 @@ proxies:
 	}
 }
 
-func TestExpandAllowsEmptyOutboundGroupAfterFiltering(t *testing.T) {
+func TestExpandAddsBlockFallbackForEmptyOutboundGroupAfterFiltering(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
   - name: HK VLESS
@@ -898,11 +984,14 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if len(selectorOptions.Outbounds) != 0 {
-		t.Fatalf("selector outbounds = %#v, want empty", selectorOptions.Outbounds)
+	if got, want := selectorOptions.Outbounds, []string{"empty-outbound-group"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
 	}
-	if len(urlTestOptions.Outbounds) != 0 {
-		t.Fatalf("urltest outbounds = %#v, want empty", urlTestOptions.Outbounds)
+	if got, want := urlTestOptions.Outbounds, []string{"empty-outbound-group"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("urltest outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 4 || options.Outbounds[3].Type != C.TypeBlock || options.Outbounds[3].Tag != "empty-outbound-group" {
+		t.Fatalf("fallback outbound = %#v", options.Outbounds)
 	}
 }
 
@@ -1341,6 +1430,59 @@ proxies:
 	}
 }
 
+func TestExpandHTTPProviderInvalidFetchedContentUsesCachedContent(t *testing.T) {
+	cachePath := writeSubscription(t, `
+proxies:
+  - name: Cached SS
+    type: ss
+    server: cached.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: cached-pass
+`)
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(cachePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`<script>location.href="/login"</script>`))
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type:     "http",
+				URL:      server.URL,
+				Path:     cachePath,
+				Interval: 1,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"Cached SS"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cached) == `<script>location.href="/login"</script>` {
+		t.Fatal("invalid fetched content overwrote cache")
+	}
+}
+
 func TestExpandHTTPProviderFetchFailureWithoutCacheSkipsProvider(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1377,6 +1519,112 @@ func TestExpandHTTPProviderFetchFailureWithoutCacheSkipsProvider(t *testing.T) {
 	}
 	if len(options.Outbounds) != 2 {
 		t.Fatalf("outbound count = %d, want 2", len(options.Outbounds))
+	}
+}
+
+func TestExpandHTTPProviderInvalidFetchedContentWithoutCacheSkipsProvider(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`<script>location.href="/login"</script>`))
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{
+		Outbounds: []string{"DIRECT"},
+		Use:       []string{"sub"},
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "http",
+				URL:  server.URL,
+				Path: filepath.Join(t.TempDir(), "missing.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeDirect, Tag: "DIRECT"},
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 2 {
+		t.Fatalf("outbound count = %d, want 2", len(options.Outbounds))
+	}
+}
+
+func TestExpandHTTPProviderInvalidFetchedContentAddsBlockFallbackForEmptyGroup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<script>location.href="/login"</script>`))
+	}))
+	defer server.Close()
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "http",
+				URL:  server.URL,
+				Path: filepath.Join(t.TempDir(), "missing.yaml"),
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"empty-outbound-group"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 2 || options.Outbounds[1].Type != C.TypeBlock || options.Outbounds[1].Tag != "empty-outbound-group" {
+		t.Fatalf("fallback outbound = %#v", options.Outbounds)
+	}
+}
+
+func TestExpandAddsBlockFallbackWhenGroupFilterMatchesNoProviderProxies(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: US SS
+    type: ss
+    server: us.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: us-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{
+		Use:    []string{"sub"},
+		Filter: "HK",
+	}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"empty-outbound-group"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	if len(options.Outbounds) != 3 || options.Outbounds[2].Type != C.TypeBlock || options.Outbounds[2].Tag != "empty-outbound-group" {
+		t.Fatalf("fallback outbound = %#v", options.Outbounds)
 	}
 }
 
