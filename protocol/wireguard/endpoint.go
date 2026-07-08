@@ -136,13 +136,8 @@ func (w *Endpoint) Close() error {
 	return w.endpoint.Close()
 }
 
-func (w *Endpoint) SupportsFlow(network string) bool {
-	switch network {
-	case N.NetworkTCP, N.NetworkUDP, N.NetworkICMP:
-		return true
-	default:
-		return false
-	}
+func (w *Endpoint) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
+	return adapter.PreMatchFlow
 }
 
 func (w *Endpoint) PortAddresses() (netip.Addr, netip.Addr) {

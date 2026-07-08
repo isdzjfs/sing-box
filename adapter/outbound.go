@@ -29,7 +29,7 @@ type OutboundWithPreferredRoutes interface {
 type FlowOutbound interface {
 	Outbound
 	tun.Port
-	SupportsFlow(network string) bool
+	PreMatchFlow(network string, destination netip.Addr) PreMatchAction
 }
 
 type OutboundRegistry interface {
