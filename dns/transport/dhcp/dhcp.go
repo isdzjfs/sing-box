@@ -2,9 +2,11 @@ package dhcp
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -49,10 +51,12 @@ type Transport struct {
 	networkManager    adapter.NetworkManager
 	platformInterface adapter.PlatformInterface
 	interfaceName     string
+	clientID          []byte
 	interfaceCallback *list.Element[tun.DefaultInterfaceUpdateCallback]
 	transportLock     sync.RWMutex
 	updatedAt         time.Time
 	lastError         error
+	informFailed      bool
 	servers           []M.Socksaddr
 	search            []string
 	ndots             int
@@ -65,6 +69,10 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
 	if err != nil {
 		return nil, err
 	}
+	clientID, err := parseClientID(options.ClientID)
+	if err != nil {
+		return nil, err
+	}
 	return &Transport{
 		TransportAdapter:  dns.NewTransportAdapterWithLocalOptions(C.DNSTypeDHCP, tag, options.LocalDNSServerOptions),
 		ctx:               ctx,
@@ -73,9 +81,32 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
 		networkManager:    service.FromContext[adapter.NetworkManager](ctx),
 		platformInterface: service.FromContext[adapter.PlatformInterface](ctx),
 		interfaceName:     options.Interface,
+		clientID:          clientID,
 		ndots:             1,
 		attempts:          2,
 	}, nil
+}
+
+func parseClientID(value string) ([]byte, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if !strings.Contains(value, ":") {
+		return []byte(value), nil
+	}
+	segments := strings.Split(value, ":")
+	clientID := make([]byte, 0, len(segments))
+	for _, segment := range segments {
+		if len(segment) != 2 {
+			return nil, E.New("invalid client_id: ", value)
+		}
+		segmentValue, err := hex.DecodeString(segment)
+		if err != nil {
+			return nil, E.New("invalid client_id: ", value)
+		}
+		clientID = append(clientID, segmentValue[0])
+	}
+	return clientID, nil
 }
 
 func NewRawTransport(transportAdapter dns.TransportAdapter, ctx context.Context, dialer N.Dialer, logger log.ContextLogger) *Transport {
@@ -123,6 +154,7 @@ func (t *Transport) Reset() {
 	t.transportLock.Lock()
 	t.updatedAt = time.Time{}
 	t.lastError = nil
+	t.informFailed = false
 	t.servers = nil
 	t.transportLock.Unlock()
 }
@@ -211,9 +243,7 @@ func (t *Transport) updateServers() error {
 		return E.Cause(err, "prepare interface")
 	}
 	t.logger.Info("dhcp: query DNS servers on ", iface.Name)
-	fetchCtx, cancel := context.WithTimeout(t.ctx, C.DHCPTimeout)
-	err = t.fetchServers0(fetchCtx, iface)
-	cancel()
+	err = t.fetchServers0(iface)
 	t.updatedAt = time.Now()
 	if err != nil {
 		t.lastError = err
@@ -228,6 +258,7 @@ func (t *Transport) updateServers() error {
 }
 
 func (t *Transport) interfaceUpdated(defaultInterface *control.Interface, flags int) {
+	t.informFailed = false
 	err := t.updateServers()
 	if err != nil {
 		if errors.Is(err, errInterfaceIsCellular) && t.optional {
@@ -238,13 +269,45 @@ func (t *Transport) interfaceUpdated(defaultInterface *control.Interface, flags 
 	}
 }
 
-func (t *Transport) fetchServers0(ctx context.Context, iface *control.Interface) error {
+func (t *Transport) fetchServers0(iface *control.Interface) error {
+	if !t.informFailed {
+		informAddress := interfaceIPv4Address(iface)
+		if informAddress.IsValid() {
+			informCtx, informCancel := context.WithTimeout(t.ctx, C.DHCPTimeout)
+			err := t.exchangeDHCP(informCtx, iface, informAddress)
+			informCancel()
+			if err == nil {
+				return nil
+			}
+			t.informFailed = true
+			t.logger.Debug("dhcp: query DNS servers via INFORM on ", iface.Name, ": ", err, "; fallback to DISCOVER")
+		}
+	}
+	discoverCtx, discoverCancel := context.WithTimeout(t.ctx, C.DHCPTimeout)
+	defer discoverCancel()
+	return t.exchangeDHCP(discoverCtx, iface, netip.Addr{})
+}
+
+func interfaceIPv4Address(iface *control.Interface) netip.Addr {
+	for _, prefix := range iface.Addresses {
+		if prefix.Addr().Is4() && !prefix.Addr().IsLinkLocalUnicast() {
+			return prefix.Addr()
+		}
+	}
+	return netip.Addr{}
+}
+
+func (t *Transport) exchangeDHCP(ctx context.Context, iface *control.Interface, informAddress netip.Addr) error {
 	var listener net.ListenConfig
 	listener.Control = control.Append(listener.Control, control.BindToInterface(t.networkManager.InterfaceFinder(), iface.Name, iface.Index))
 	listener.Control = control.Append(listener.Control, control.ReuseAddr())
 	listenAddr := "0.0.0.0:68"
 	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-		listenAddr = "255.255.255.255:68"
+		if informAddress.IsValid() {
+			listenAddr = netip.AddrPortFrom(informAddress, 68).String()
+		} else {
+			listenAddr = "255.255.255.255:68"
+		}
 	}
 	var (
 		packetConn net.PacketConn
@@ -262,23 +325,41 @@ func (t *Transport) fetchServers0(ctx context.Context, iface *control.Interface)
 	}
 	defer packetConn.Close()
 
-	discovery, err := dhcpv4.NewDiscovery(iface.HardwareAddr, dhcpv4.WithBroadcast(true), dhcpv4.WithRequestedOptions(
+	options := []dhcpv4.Modifier{dhcpv4.WithRequestedOptions(
 		dhcpv4.OptionDomainName,
 		dhcpv4.OptionDomainNameServer,
 		dhcpv4.OptionDNSDomainSearchList,
-	))
+	)}
+	clientID := t.clientID
+	if len(clientID) == 0 && len(iface.HardwareAddr) > 0 {
+		clientID = append([]byte{1}, iface.HardwareAddr...)
+	}
+	if len(clientID) > 0 {
+		options = append(options, dhcpv4.WithOption(dhcpv4.OptClientIdentifier(clientID)))
+	}
+	var (
+		request      *dhcpv4.DHCPv4
+		expectedType dhcpv4.MessageType
+	)
+	if informAddress.IsValid() {
+		request, err = dhcpv4.NewInform(iface.HardwareAddr, informAddress.AsSlice(), options...)
+		expectedType = dhcpv4.MessageTypeAck
+	} else {
+		request, err = dhcpv4.NewDiscovery(iface.HardwareAddr, append(options, dhcpv4.WithBroadcast(true))...)
+		expectedType = dhcpv4.MessageTypeOffer
+	}
 	if err != nil {
 		return err
 	}
 
-	_, err = packetConn.WriteTo(discovery.ToBytes(), &net.UDPAddr{IP: net.IPv4bcast, Port: 67})
+	_, err = packetConn.WriteTo(request.ToBytes(), &net.UDPAddr{IP: net.IPv4bcast, Port: 67})
 	if err != nil {
 		return err
 	}
 
 	var group task.Group
 	group.Append0(func(ctx context.Context) error {
-		return t.fetchServersResponse(iface, packetConn, discovery.TransactionID)
+		return t.fetchServersResponse(iface, packetConn, request.TransactionID, expectedType)
 	})
 	group.Cleanup(func() {
 		packetConn.Close()
@@ -286,7 +367,7 @@ func (t *Transport) fetchServers0(ctx context.Context, iface *control.Interface)
 	return group.Run(ctx)
 }
 
-func (t *Transport) fetchServersResponse(iface *control.Interface, packetConn net.PacketConn, transactionID dhcpv4.TransactionID) error {
+func (t *Transport) fetchServersResponse(iface *control.Interface, packetConn net.PacketConn, transactionID dhcpv4.TransactionID, expectedType dhcpv4.MessageType) error {
 	buffer := buf.NewSize(dhcpv4.MaxMessageSize)
 	defer buffer.Release()
 
@@ -306,8 +387,8 @@ func (t *Transport) fetchServersResponse(iface *control.Interface, packetConn ne
 			return err
 		}
 
-		if dhcpPacket.MessageType() != dhcpv4.MessageTypeOffer {
-			t.logger.Trace("dhcp: expected OFFER response, but got ", dhcpPacket.MessageType())
+		if dhcpPacket.MessageType() != expectedType {
+			t.logger.Trace("dhcp: expected ", expectedType, " response, but got ", dhcpPacket.MessageType())
 			continue
 		}
 

@@ -183,6 +183,7 @@ type FakeIPDNSServerOptions struct {
 type DHCPDNSServerOptions struct {
 	LocalDNSServerOptions
 	Interface string `json:"interface,omitempty"`
+	ClientID  string `json:"client_id,omitempty"`
 }
 
 type MDNSDNSServerOptions struct {
