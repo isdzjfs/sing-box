@@ -228,6 +228,7 @@ func (s *Server) SetMode(newMode string) {
 		return
 	}
 	s.mode = newMode
+	closeConnectionsForModeSwitch(s.trafficManager, s.network)
 	s.modeUpdateAccess.Lock()
 	for _, hook := range s.modeUpdateHooks {
 		hook.Emit(struct{}{})
@@ -242,6 +243,23 @@ func (s *Server) SetMode(newMode string) {
 		}
 	}
 	s.logger.Info("updated mode: ", newMode)
+}
+
+type allConnectionCloser interface {
+	CloseAllConnections()
+}
+
+type networkResetter interface {
+	ResetNetwork()
+}
+
+func closeConnectionsForModeSwitch(trafficManager allConnectionCloser, network networkResetter) {
+	if trafficManager != nil {
+		trafficManager.CloseAllConnections()
+	}
+	if network != nil {
+		network.ResetNetwork()
+	}
 }
 
 func authentication(serverSecret string) func(next http.Handler) http.Handler {
