@@ -110,8 +110,12 @@ func newTestURLTestGroup(t *testing.T, interval time.Duration, idleTimeout time.
 }
 
 type testURLTestOutbound struct {
-	tag       string
-	dialCount atomic.Int32
+	tag            string
+	network        []string
+	dialCount      atomic.Int32
+	listenCount    atomic.Int32
+	dialFn         func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
+	listenPacketFn func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
 }
 
 func (o *testURLTestOutbound) Type() string {
@@ -123,6 +127,9 @@ func (o *testURLTestOutbound) Tag() string {
 }
 
 func (o *testURLTestOutbound) Network() []string {
+	if o.network != nil {
+		return o.network
+	}
 	return []string{N.NetworkTCP, N.NetworkUDP}
 }
 
@@ -132,11 +139,165 @@ func (o *testURLTestOutbound) Dependencies() []string {
 
 func (o *testURLTestOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	o.dialCount.Add(1)
+	if o.dialFn != nil {
+		return o.dialFn(ctx, network, destination)
+	}
 	return nil, errors.New("expected test dial failure")
 }
 
 func (o *testURLTestOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	o.listenCount.Add(1)
+	if o.listenPacketFn != nil {
+		return o.listenPacketFn(ctx, destination)
+	}
 	return nil, errors.New("not implemented")
+}
+
+func TestURLTestDiscardsConnectionDialedByStaleOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	staleConn := &testURLTestConn{}
+	freshConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	var group *URLTestGroup
+	staleOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		group.selectedOutboundTCP = freshOutbound
+		return staleConn, nil
+	}
+	freshOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		return freshConn, nil
+	}
+	var err error
+	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	group.selectedOutboundTCP = staleOutbound
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	conn, err := outbound.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.True(t, staleConn.Closed())
+	require.False(t, freshConn.Closed())
+	require.Equal(t, int32(1), staleOutbound.dialCount.Load())
+	require.Equal(t, int32(1), freshOutbound.dialCount.Load())
+
+	require.NoError(t, conn.Close())
+	require.True(t, freshConn.Closed())
+}
+
+func TestURLTestDiscardsPacketConnectionListenedByStaleOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	staleConn := &testURLTestPacketConn{}
+	freshConn := &testURLTestPacketConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	var group *URLTestGroup
+	staleOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		group.selectedOutboundUDP = freshOutbound
+		return staleConn, nil
+	}
+	freshOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		return freshConn, nil
+	}
+	var err error
+	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	group.selectedOutboundUDP = staleOutbound
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	conn, err := outbound.ListenPacket(context.Background(), M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.True(t, staleConn.Closed())
+	require.False(t, freshConn.Closed())
+	require.Equal(t, int32(1), staleOutbound.listenCount.Load())
+	require.Equal(t, int32(1), freshOutbound.listenCount.Load())
+
+	require.NoError(t, conn.Close())
+	require.True(t, freshConn.Closed())
+}
+
+func newTestURLTestContext() context.Context {
+	ctx := context.Background()
+	ctx = service.ContextWithPtr(ctx, urltest.NewHistoryStorage())
+	ctx = pause.WithDefaultManager(ctx)
+	return ctx
+}
+
+type testURLTestConn struct {
+	closed atomic.Bool
+}
+
+func (c *testURLTestConn) Read(p []byte) (n int, err error) {
+	return 0, net.ErrClosed
+}
+
+func (c *testURLTestConn) Write(p []byte) (n int, err error) {
+	return 0, net.ErrClosed
+}
+
+func (c *testURLTestConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func (c *testURLTestConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *testURLTestConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *testURLTestConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestConn) Closed() bool {
+	return c.closed.Load()
+}
+
+type testURLTestPacketConn struct {
+	closed atomic.Bool
+}
+
+func (c *testURLTestPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	return 0, nil, net.ErrClosed
+}
+
+func (c *testURLTestPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	return 0, net.ErrClosed
+}
+
+func (c *testURLTestPacketConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func (c *testURLTestPacketConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{}
+}
+
+func (c *testURLTestPacketConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestPacketConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestPacketConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *testURLTestPacketConn) Closed() bool {
+	return c.closed.Load()
 }
 
 type testURLTestOutboundManager struct {

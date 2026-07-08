@@ -30,6 +30,8 @@ func RegisterURLTest(registry *outbound.Registry) {
 
 var _ adapter.OutboundGroup = (*URLTest)(nil)
 
+const maxURLTestDialAttempts = 2
+
 type URLTest struct {
 	outbound.Adapter
 	ctx                          context.Context
@@ -114,46 +116,63 @@ func (s *URLTest) CheckOutbounds() {
 
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	s.group.Touch()
-	var outbound adapter.Outbound
-	switch N.NetworkName(network) {
+	networkName := N.NetworkName(network)
+	switch networkName {
 	case N.NetworkTCP:
-		outbound = s.group.selectedOutboundTCP
 	case N.NetworkUDP:
-		outbound = s.group.selectedOutboundUDP
 	default:
 		return nil, E.Extend(N.ErrUnknownNetwork, network)
 	}
-	if outbound == nil {
-		outbound, _ = s.group.Select(network)
+
+	for attempt := 0; attempt < maxURLTestDialAttempts; attempt++ {
+		outbound := s.group.selectedOutbound(networkName)
+		if outbound == nil {
+			outbound, _ = s.group.Select(networkName)
+		}
+		if outbound == nil {
+			return nil, E.New("missing supported outbound")
+		}
+		conn, err := outbound.DialContext(ctx, network, destination)
+		if err == nil {
+			// The selected outbound can change while the underlying dial is in progress.
+			if !s.group.isSelectedOutbound(networkName, outbound) {
+				_ = conn.Close()
+				continue
+			}
+			return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+		}
+		s.logger.ErrorContext(ctx, err)
+		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		return nil, err
 	}
-	if outbound == nil {
-		return nil, E.New("missing supported outbound")
-	}
-	conn, err := outbound.DialContext(ctx, network, destination)
-	if err == nil {
-		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
-	}
-	s.logger.ErrorContext(ctx, err)
-	s.group.history.DeleteURLTestHistory(outbound.Tag())
-	return nil, err
+	return nil, E.New("selected outbound changed while dialing")
 }
 
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	s.group.Touch()
-	outbound := s.group.selectedOutboundUDP
-	if outbound == nil {
-		outbound, _ = s.group.Select(N.NetworkUDP)
+
+	for attempt := 0; attempt < maxURLTestDialAttempts; attempt++ {
+		outbound := s.group.selectedOutbound(N.NetworkUDP)
+		if outbound == nil {
+			outbound, _ = s.group.Select(N.NetworkUDP)
+		}
+		if outbound == nil {
+			return nil, E.New("missing supported outbound")
+		}
+		conn, err := outbound.ListenPacket(ctx, destination)
+		if err == nil {
+			// The selected outbound can change while the underlying packet dial is in progress.
+			if !s.group.isSelectedOutbound(N.NetworkUDP, outbound) {
+				_ = conn.Close()
+				continue
+			}
+			return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+		}
+		s.logger.ErrorContext(ctx, err)
+		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		return nil, err
 	}
-	if outbound == nil {
-		return nil, E.New("missing supported outbound")
-	}
-	conn, err := outbound.ListenPacket(ctx, destination)
-	if err == nil {
-		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
-	}
-	s.logger.ErrorContext(ctx, err)
-	s.group.history.DeleteURLTestHistory(outbound.Tag())
-	return nil, err
+	return nil, E.New("selected outbound changed while listening packet")
 }
 
 func (s *URLTest) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -309,6 +328,22 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		return nil, false
 	}
 	return minOutbound, true
+}
+
+func (g *URLTestGroup) selectedOutbound(network string) adapter.Outbound {
+	switch network {
+	case N.NetworkTCP:
+		return g.selectedOutboundTCP
+	case N.NetworkUDP:
+		return g.selectedOutboundUDP
+	default:
+		return nil
+	}
+}
+
+func (g *URLTestGroup) isSelectedOutbound(network string, outbound adapter.Outbound) bool {
+	selected := g.selectedOutbound(network)
+	return selected == nil || selected == outbound
 }
 
 func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
