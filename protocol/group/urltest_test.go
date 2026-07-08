@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
@@ -95,44 +96,6 @@ func TestURLTestGroupSkipsSharedOutboundRecentlyCheckedByAnotherGroup(t *testing
 	require.Len(t, histories, 2)
 	require.Equal(t, checkedAt.Add(30*time.Second), histories[1].Time)
 	require.Equal(t, uint16(0), histories[1].Delay)
-}
-
-func TestURLTestNowFallsBackToFirstSupportedOutboundBeforeSelection(t *testing.T) {
-	ctx := newTestURLTestContext()
-	firstOutbound := &testURLTestOutbound{tag: "first"}
-	secondOutbound := &testURLTestOutbound{tag: "second"}
-	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{firstOutbound, secondOutbound}, "", time.Minute, 0, time.Minute, false)
-	require.NoError(t, err)
-	outbound := &URLTest{group: group}
-
-	require.Equal(t, "first", outbound.Now())
-	require.Nil(t, group.selectedOutboundTCP)
-	require.Nil(t, group.selectedOutboundUDP)
-}
-
-func TestURLTestNowFallsBackToHistoryBestOutboundBeforeSelection(t *testing.T) {
-	ctx := context.Background()
-	history := urltest.NewHistoryStorage()
-	ctx = service.ContextWithPtr(ctx, history)
-	ctx = pause.WithDefaultManager(ctx)
-	slowOutbound := &testURLTestOutbound{tag: "slow"}
-	fastOutbound := &testURLTestOutbound{tag: "fast"}
-	checkedAt := time.Unix(1000, 0)
-	history.StoreURLTestHistory("slow", &adapter.URLTestHistory{
-		Time:  checkedAt,
-		Delay: 100,
-	})
-	history.StoreURLTestHistory("fast", &adapter.URLTestHistory{
-		Time:  checkedAt,
-		Delay: 10,
-	})
-	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{slowOutbound, fastOutbound}, "", time.Minute, 0, time.Minute, false)
-	require.NoError(t, err)
-	outbound := &URLTest{group: group}
-
-	require.Equal(t, "fast", outbound.Now())
-	require.Nil(t, group.selectedOutboundTCP)
-	require.Nil(t, group.selectedOutboundUDP)
 }
 
 func newTestURLTestGroup(t *testing.T, interval time.Duration, idleTimeout time.Duration) *URLTestGroup {
@@ -253,6 +216,108 @@ func TestURLTestDiscardsPacketConnectionListenedByStaleOutbound(t *testing.T) {
 	require.True(t, freshConn.Closed())
 }
 
+func TestURLTestInterruptsFallbackConnectionWhenFirstCheckSelectsDifferentOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	staleConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	staleOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		return staleConn, nil
+	}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	_, err = outbound.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.False(t, staleConn.Closed())
+	require.Nil(t, group.selectedOutboundTCP)
+
+	group.history.StoreURLTestHistory("fresh", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	group.performUpdateCheck()
+
+	require.True(t, staleConn.Closed())
+	require.Equal(t, freshOutbound, group.selectedOutboundTCP)
+}
+
+func TestURLTestInterruptsFallbackPacketConnectionWhenFirstCheckSelectsDifferentOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	staleConn := &testURLTestPacketConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	staleOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		return staleConn, nil
+	}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	_, err = outbound.ListenPacket(context.Background(), M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.False(t, staleConn.Closed())
+	require.Nil(t, group.selectedOutboundUDP)
+
+	group.history.StoreURLTestHistory("fresh", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	group.performUpdateCheck()
+
+	require.True(t, staleConn.Closed())
+	require.Equal(t, freshOutbound, group.selectedOutboundUDP)
+}
+
+func TestURLTestInterruptsTrackedConnectionWhenFirstCheckSelectsOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	localConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	connectionManager := &testURLTestConnectionManager{}
+	outbound := &URLTest{group: group, connection: connectionManager}
+
+	outbound.NewConnection(context.Background(), localConn, adapter.InboundContext{}, nil)
+	require.NotNil(t, connectionManager.conn)
+	require.False(t, localConn.Closed())
+
+	group.history.StoreURLTestHistory("fresh", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	group.performUpdateCheck()
+
+	require.True(t, localConn.Closed())
+	require.Equal(t, freshOutbound, group.selectedOutboundTCP)
+}
+
+func TestURLTestInterruptsTrackedPacketConnectionWhenFirstCheckSelectsOutbound(t *testing.T) {
+	ctx := newTestURLTestContext()
+	localConn := &testURLTestPacketConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	connectionManager := &testURLTestConnectionManager{}
+	outbound := &URLTest{group: group, connection: connectionManager}
+
+	outbound.NewPacketConnection(context.Background(), bufio.NewPacketConn(localConn), adapter.InboundContext{}, nil)
+	require.NotNil(t, connectionManager.packetConn)
+	require.False(t, localConn.Closed())
+
+	group.history.StoreURLTestHistory("fresh", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	group.performUpdateCheck()
+
+	require.True(t, localConn.Closed())
+	require.Equal(t, freshOutbound, group.selectedOutboundUDP)
+}
+
 func newTestURLTestContext() context.Context {
 	ctx := context.Background()
 	ctx = service.ContextWithPtr(ctx, urltest.NewHistoryStorage())
@@ -360,6 +425,42 @@ func (m *testURLTestOutboundManager) Outbound(tag string) (adapter.Outbound, boo
 
 func (m *testURLTestOutboundManager) Default() adapter.Outbound {
 	return m.outbound
+}
+
+type testURLTestConnectionManager struct {
+	conn       net.Conn
+	packetConn N.PacketConn
+}
+
+func (m *testURLTestConnectionManager) Start(stage adapter.StartStage) error {
+	return nil
+}
+
+func (m *testURLTestConnectionManager) Close() error {
+	return nil
+}
+
+func (m *testURLTestConnectionManager) Count() int {
+	return 0
+}
+
+func (m *testURLTestConnectionManager) CloseAll() {
+}
+
+func (m *testURLTestConnectionManager) TrackConn(conn net.Conn) net.Conn {
+	return conn
+}
+
+func (m *testURLTestConnectionManager) TrackPacketConn(conn net.PacketConn) net.PacketConn {
+	return conn
+}
+
+func (m *testURLTestConnectionManager) NewConnection(ctx context.Context, this N.Dialer, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	m.conn = conn
+}
+
+func (m *testURLTestConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	m.packetConn = conn
 }
 
 func (m *testURLTestOutboundManager) Remove(tag string) error {

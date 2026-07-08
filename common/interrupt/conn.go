@@ -4,6 +4,7 @@ import (
 	"net"
 
 	"github.com/sagernet/sing/common/bufio"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
 )
 
@@ -73,4 +74,29 @@ func (c *PacketConn) WriterReplaceable() bool {
 
 func (c *PacketConn) Upstream() any {
 	return bufio.NewPacketConn(c.PacketConn)
+}
+
+type NetworkPacketConn struct {
+	N.PacketConn
+	group   *Group
+	element *list.Element[*groupConnItem]
+}
+
+func (c *NetworkPacketConn) Close() error {
+	c.group.access.Lock()
+	defer c.group.access.Unlock()
+	c.group.connections.Remove(c.element)
+	return c.PacketConn.Close()
+}
+
+func (c *NetworkPacketConn) ReaderReplaceable() bool {
+	return true
+}
+
+func (c *NetworkPacketConn) WriterReplaceable() bool {
+	return true
+}
+
+func (c *NetworkPacketConn) Upstream() any {
+	return c.PacketConn
 }
