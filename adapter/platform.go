@@ -53,7 +53,25 @@ type PlatformInterface interface {
 	TailscaleHostname() string
 
 	UsePlatformBridge() bool
-	CreateBridge(mtu uint32) (int, string, error)
+	CreateBridge(options BridgeOptions) (BridgeSession, error)
+}
+
+type BridgeOptions struct {
+	BridgeName string
+	MTU        uint32
+	Inet4Port  netip.Addr
+	Inet6Port  netip.Addr
+	Interface  string
+	RuleIndex  int
+	RouteTable int
+}
+
+type BridgeSession interface {
+	FileDescriptor() int
+	Name() string
+	Inet6Active() bool
+	SetEgress(interfaceName string) error
+	Close() error
 }
 
 type PlatformUser struct {

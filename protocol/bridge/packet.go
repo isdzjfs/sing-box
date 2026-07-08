@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	bridgeTunMTU       = 1500
-	maxPacketLength    = 0xffff
-	bridgeMaxInstances = 254
+	bridgeTunMTU         = 1500
+	maxPacketLength      = 0xffff
+	bridgeMaxInstances   = 254
+	bridgeWriteBatchSize = 32
 )
 
 var (
@@ -50,14 +51,6 @@ func addressAt(base netip.Addr, offset uint32) netip.Addr {
 		addr = addr.Next()
 	}
 	return addr
-}
-
-func (b *backendBase) egressMTU(egress string) int {
-	iface, err := b.networkManager.InterfaceFinder().ByName(egress)
-	if err != nil || iface.MTU < 576 || iface.MTU > bridgeTunMTU {
-		return bridgeTunMTU
-	}
-	return iface.MTU
 }
 
 func fixReturnChecksum(packet []byte) {

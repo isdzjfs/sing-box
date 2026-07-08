@@ -2,39 +2,24 @@ package bridge
 
 import (
 	"context"
-	"net"
 	"net/netip"
-	"os"
-	"strings"
 	"sync"
 
 	"github.com/sagernet/netlink"
-	"github.com/sagernet/nftables"
-	"github.com/sagernet/nftables/binaryutil"
-	"github.com/sagernet/nftables/expr"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
-	defaultBridgeRuleIndex = 100
-	// 2200 avoids sing-tun's default tun table (2022).
+	defaultBridgeRuleIndex      = 100
 	defaultBridgeTableIndexBase = 2200
-
-	bridgeWriteBatchSize = 32
-)
-
-// fullcone is an out-of-tree nftables verb (the nft_fullcone module), absent on
-// stock kernels.
-var (
-	fullConeProbeOnce   sync.Once
-	fullConeProbeResult bool
 )
 
 type backendLinux struct {
@@ -43,6 +28,8 @@ type backendLinux struct {
 	nftTableName string
 	routeTable   int
 	ruleIndex    int
+
+	platform adapter.PlatformInterface
 
 	batchTUN tun.LinuxTUN
 
@@ -59,11 +46,15 @@ func newBackend(ctx context.Context, logger logger.ContextLogger, networkManager
 	if err != nil {
 		return nil, err
 	}
+	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
+	if platformInterface != nil && platformInterface.UsePlatformBridge() {
+		instance.platform = platformInterface
+	}
 	instance.ruleIndex = options.IPRoute2RuleIndex
 	if instance.ruleIndex == 0 {
 		instance.ruleIndex = defaultBridgeRuleIndex
 	}
-	if instance.boundInterface != "" {
+	if instance.boundInterface != "" || instance.platform != nil {
 		instance.routeTable = options.IPRoute2TableIndex
 		if instance.routeTable == 0 {
 			instance.routeTable = defaultBridgeTableIndexBase + int(instance.index)
@@ -85,15 +76,18 @@ func (b *backendLinux) Start(stage adapter.StartStage) error {
 }
 
 func (b *backendLinux) start() error {
+	if b.platform != nil {
+		return b.startPlatform()
+	}
 	b.tunName = tun.CalculateInterfaceName(b.bridgeName)
 	b.nftTableName = "sing-box-" + b.tunName
 	tunInterface, err := tun.New(tun.Options{
-		Name:             b.tunName,
-		MTU:              bridgeTunMTU,
-		GSO:              true,
-		AutoRoute:        false,
-		InterfaceMonitor: b.networkManager.InterfaceMonitor(),
-		Logger:           b.logger,
+		Name:                      b.tunName,
+		MTU:                       bridgeTunMTU,
+		GSO:                       true,
+		InterfaceMonitor:          b.networkManager.InterfaceMonitor(),
+		Logger:                    b.logger,
+		EXP_ExternalConfiguration: true,
 	})
 	if err != nil {
 		return E.Cause(err, "create bridge tun")
@@ -114,22 +108,25 @@ func (b *backendLinux) start() error {
 			b.writeBuffers[i] = make([]byte, b.writeHeadroom+maxPacketLength)
 		}
 	}
-	b.setupForwarding()
-	err = b.setupNftables()
+	inet6Active, err := setupBridgeNetfilter(b.logger, b.nftTableName, b.tunName, b.inet6Port.IsValid())
 	if err != nil {
-		return E.Cause(err, "set up bridge nftables")
+		return E.Cause(err, "set up bridge netfilter")
 	}
+	if !inet6Active {
+		b.inet6Port = netip.Addr{}
+	}
+	b.forwardingRestore = enableBridgeForwarding(b.logger, b.tunName, b.inet4Port.IsValid(), b.inet6Port.IsValid())
 	if b.boundInterface != "" {
 		b.syncEgress()
 	}
-	err = b.setupFamily(unix.AF_INET, b.inet4Port)
+	err = setupBridgeFamily(b.tunName, b.ruleIndex, b.routeTable, unix.AF_INET, b.inet4Port)
 	if err != nil {
 		return E.Cause(err, "set up bridge routing")
 	}
-	err = b.setupFamily(unix.AF_INET6, b.inet6Port)
+	err = setupBridgeFamily(b.tunName, b.ruleIndex, b.routeTable, unix.AF_INET6, b.inet6Port)
 	if err != nil {
 		b.logger.Debug(E.Cause(err, "IPv6 bridge routing unavailable, disabling IPv6 forwarding"))
-		b.removeFamily(unix.AF_INET6, b.inet6Port)
+		removeBridgeFamily(b.tunName, b.ruleIndex, b.routeTable, unix.AF_INET6, b.inet6Port)
 		b.inet6Port = netip.Addr{}
 	}
 	b.closed = make(chan struct{})
@@ -166,6 +163,68 @@ func (b *backendLinux) start() error {
 	return nil
 }
 
+func (b *backendLinux) startPlatform() error {
+	session, err := b.platform.CreateBridge(adapter.BridgeOptions{
+		BridgeName: b.bridgeName,
+		MTU:        bridgeTunMTU,
+		Inet4Port:  b.inet4Port,
+		Inet6Port:  b.inet6Port,
+		RuleIndex:  b.ruleIndex,
+		RouteTable: b.routeTable,
+	})
+	if err != nil {
+		return E.Cause(err, "create bridge")
+	}
+	b.session = session
+	b.tunName = session.Name()
+	if !session.Inet6Active() {
+		b.inet6Port = netip.Addr{}
+	}
+	tunInterface, err := tun.New(tun.Options{
+		Name:           b.tunName,
+		MTU:            bridgeTunMTU,
+		GSO:            true,
+		FileDescriptor: session.FileDescriptor(),
+		Logger:         b.logger,
+	})
+	if err != nil {
+		return E.Cause(err, "create bridge tun")
+	}
+	b.tunInterface = tunInterface
+	err = tunInterface.Start()
+	if err != nil {
+		return E.Cause(err, "start bridge tun")
+	}
+	linuxTUN := tunInterface.(tun.LinuxTUN)
+	if linuxTUN.BatchSize() > 1 {
+		b.batchTUN = linuxTUN
+		b.writeHeadroom = linuxTUN.FrontHeadroom()
+		b.writeBuffers = make([][]byte, bridgeWriteBatchSize)
+		for i := range b.writeBuffers {
+			b.writeBuffers[i] = make([]byte, b.writeHeadroom+maxPacketLength)
+		}
+	}
+	b.closed = make(chan struct{})
+	b.readDone = make(chan struct{})
+	if b.batchTUN != nil {
+		go b.batchReadLoop()
+	} else {
+		go b.readLoop()
+	}
+	monitor := b.networkManager.InterfaceMonitor()
+	if monitor != nil {
+		element := monitor.RegisterCallback(func(_ *control.Interface, _ int) { b.syncSessionEgress() })
+		b.unregister = func() { monitor.UnregisterCallback(element) }
+	}
+	b.syncSessionEgress()
+	egress := "auto"
+	if b.boundInterface != "" {
+		egress = b.boundInterface
+	}
+	b.logger.Info("bridge started at ", b.tunName, " (platform, egress ", egress, ")")
+	return nil
+}
+
 func (b *backendLinux) Close() error {
 	b.closeOnce.Do(func() {
 		if b.closed != nil {
@@ -180,24 +239,29 @@ func (b *backendLinux) Close() error {
 		if b.readDone != nil {
 			<-b.readDone
 		}
-		b.egressAccess.Lock()
-		if b.tunName != "" {
-			b.cleanupNftables()
-			b.removeFamily(unix.AF_INET, b.inet4Port)
-			b.removeFamily(unix.AF_INET6, b.inet6Port)
+		if b.session != nil {
+			_ = b.session.Close()
+		} else {
+			b.egressAccess.Lock()
+			if b.tunName != "" {
+				cleanupBridgeNetfilter(b.nftTableName)
+				removeBridgeFamily(b.tunName, b.ruleIndex, b.routeTable, unix.AF_INET, b.inet4Port)
+				removeBridgeFamily(b.tunName, b.ruleIndex, b.routeTable, unix.AF_INET6, b.inet6Port)
+			}
+			if b.routeTable != 0 {
+				flushBridgeRouteTable(b.routeTable)
+			}
+			b.egressAccess.Unlock()
+			restoreBridgeForwarding(b.forwardingRestore)
+			b.forwardingRestore = nil
 		}
-		if b.routeTable != 0 {
-			b.flushRouteTable()
-		}
-		b.egressAccess.Unlock()
-		b.restoreForwarding()
 		releaseBridgeIndex(b.index)
 	})
 	return nil
 }
 
 // Zero tells the dispatcher not to clamp the TCP MSS or fragment; the host kernel
-// does both on the forwarding path instead (see setupClampRules).
+// does both on the forwarding path instead (see setupBridgeClampRules).
 func (b *backendLinux) PortMTU() uint32 {
 	return 0
 }
@@ -313,112 +377,9 @@ func (b *backendLinux) batchReadLoop() {
 	}
 }
 
-func (b *backendLinux) setupForwarding() {
-	enable := func(path string) {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			b.logger.Debug(E.Cause(err, "read ", path))
-			return
-		}
-		value := strings.TrimSpace(string(content))
-		if value == "1" {
-			return
-		}
-		err = os.WriteFile(path, []byte("1"), 0o644)
-		if err != nil {
-			b.logger.Debug(E.Cause(err, "enable ", path))
-			return
-		}
-		b.forwardingRestore = append(b.forwardingRestore, sysctlState{name: path, value: value})
-	}
-	if b.inet4Port.IsValid() {
-		enable("/proc/sys/net/ipv4/ip_forward")
-	}
-	if b.inet6Port.IsValid() {
-		enable("/proc/sys/net/ipv6/conf/all/forwarding")
-	}
-	_ = os.WriteFile("/proc/sys/net/ipv4/conf/"+b.tunName+"/rp_filter", []byte("2"), 0o644)
-}
-
-func (b *backendLinux) restoreForwarding() {
-	for _, state := range b.forwardingRestore {
-		_ = os.WriteFile(state.name, []byte(state.value), 0o644)
-	}
-	b.forwardingRestore = nil
-}
-
 // The policy rules default to priority 100/101, ahead of sing-tun auto_route's rules,
 // so forwarded packets egress the physical interface instead of looping back into
 // a tun.
-func (b *backendLinux) setupFamily(family int, port netip.Addr) error {
-	if !port.IsValid() {
-		return nil
-	}
-	link, err := netlink.LinkByName(b.tunName)
-	if err != nil {
-		return err
-	}
-	err = netlink.RouteReplace(b.familyRoute(link.Attrs().Index, family, port))
-	if err != nil {
-		return E.Cause(err, "add route")
-	}
-	for _, rule := range b.familyRules(family, port) {
-		_ = netlink.RuleDel(rule)
-		err = netlink.RuleAdd(rule)
-		if err != nil {
-			return E.Cause(err, "add rule")
-		}
-	}
-	return nil
-}
-
-func (b *backendLinux) removeFamily(family int, port netip.Addr) {
-	if !port.IsValid() {
-		return
-	}
-	link, err := netlink.LinkByName(b.tunName)
-	if err == nil {
-		_ = netlink.RouteDel(b.familyRoute(link.Attrs().Index, family, port))
-	}
-	for _, rule := range b.familyRules(family, port) {
-		_ = netlink.RuleDel(rule)
-	}
-}
-
-func (b *backendLinux) familyRoute(linkIndex int, family int, port netip.Addr) *netlink.Route {
-	bits := port.BitLen()
-	route := &netlink.Route{
-		LinkIndex: linkIndex,
-		Dst:       &net.IPNet{IP: port.AsSlice(), Mask: net.CIDRMask(bits, bits)},
-		Table:     unix.RT_TABLE_MAIN,
-	}
-	if family == unix.AF_INET {
-		route.Scope = netlink.Scope(unix.RT_SCOPE_LINK)
-	}
-	return route
-}
-
-func (b *backendLinux) familyRules(family int, port netip.Addr) []*netlink.Rule {
-	forwardTable := unix.RT_TABLE_MAIN
-	if b.routeTable != 0 {
-		forwardTable = b.routeTable
-	}
-
-	iifRule := netlink.NewRule()
-	iifRule.Priority = b.ruleIndex
-	iifRule.IifName = b.tunName
-	iifRule.Table = forwardTable
-	iifRule.Family = family
-
-	toRule := netlink.NewRule()
-	toRule.Priority = b.ruleIndex + 1
-	toRule.Dst = netip.PrefixFrom(port, port.BitLen())
-	toRule.Table = unix.RT_TABLE_MAIN
-	toRule.Family = family
-
-	return []*netlink.Rule{iifRule, toRule}
-}
-
 func (b *backendLinux) syncEgress() {
 	b.egressAccess.Lock()
 	defer b.egressAccess.Unlock()
@@ -428,16 +389,16 @@ func (b *backendLinux) syncEgress() {
 	default:
 	}
 	b.updateClampLocked()
-	b.flushRouteTable()
+	flushBridgeRouteTable(b.routeTable)
 	link, err := netlink.LinkByName(b.boundInterface)
 	if err != nil {
-		for _, family := range b.activeFamilies() {
-			b.blackholeDefault(family)
+		for _, family := range activeBridgeFamilies(b.inet6Port) {
+			blackholeBridgeDefault(b.routeTable, family)
 		}
 		b.logger.Debug("pinned egress ", b.boundInterface, " absent, dropping forwarded traffic")
 		return
 	}
-	for _, family := range b.activeFamilies() {
+	for _, family := range activeBridgeFamilies(b.inet6Port) {
 		b.syncEgressFamily(family, link.Attrs().Index)
 	}
 }
@@ -473,93 +434,7 @@ func (b *backendLinux) syncEgressFamily(family int, linkIndex int) {
 			return
 		}
 	}
-	b.blackholeDefault(family)
-}
-
-func (b *backendLinux) blackholeDefault(family int) {
-	_ = netlink.RouteReplace(&netlink.Route{
-		Table:  b.routeTable,
-		Family: family,
-		Type:   unix.RTN_BLACKHOLE,
-		Dst:    defaultDestination(family),
-	})
-}
-
-func (b *backendLinux) flushRouteTable() {
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: b.routeTable}, netlink.RT_FILTER_TABLE)
-		if err != nil {
-			continue
-		}
-		for _, route := range routes {
-			toDelete := route
-			_ = netlink.RouteDel(&toDelete)
-		}
-	}
-}
-
-func (b *backendLinux) activeFamilies() []int {
-	families := []int{unix.AF_INET}
-	if b.inet6Port.IsValid() {
-		families = append(families, unix.AF_INET6)
-	}
-	return families
-}
-
-func probeAddress(family int) net.IP {
-	if family == unix.AF_INET6 {
-		return net.ParseIP("2000::")
-	}
-	return net.IPv4(1, 1, 1, 1)
-}
-
-func defaultDestination(family int) *net.IPNet {
-	if family == unix.AF_INET6 {
-		return &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
-	}
-	return &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
-}
-
-func (b *backendLinux) setupNftables() error {
-	b.cleanupNftables()
-	nft, err := nftables.New()
-	if err != nil {
-		return err
-	}
-	table := nft.AddTable(&nftables.Table{
-		Family: nftables.TableFamilyINet,
-		Name:   b.nftTableName,
-	})
-	chain := nft.AddChain(&nftables.Chain{
-		Name:     "postrouting",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookPostrouting,
-		Priority: nftables.ChainPriorityNATSource,
-	})
-	// The nft_fullcone verb, like masquerade, sources from the routing-chosen egress
-	// interface.
-	var sourceNat expr.Any = &expr.Masq{}
-	if fullConeSupported() {
-		sourceNat = &expr.FullCone{}
-	}
-	nft.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: []expr.Any{
-			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: nftIfname(b.tunName)},
-			sourceNat,
-		},
-	})
-	nft.AddChain(&nftables.Chain{
-		Name:     "forward",
-		Table:    table,
-		Type:     nftables.ChainTypeFilter,
-		Hooknum:  nftables.ChainHookForward,
-		Priority: nftables.ChainPriorityMangle,
-	})
-	return nft.Flush()
+	blackholeBridgeDefault(b.routeTable, family)
 }
 
 func (b *backendLinux) updateClamp() {
@@ -582,7 +457,7 @@ func (b *backendLinux) updateClampLocked() {
 	if mtu == b.clampMTU {
 		return
 	}
-	err := b.setupClampRules(mtu)
+	err := setupBridgeClamp(b.nftTableName, b.tunName, b.inet4Port, b.inet6Port, mtu)
 	if err != nil {
 		b.logger.Debug(E.Cause(err, "update bridge MSS clamp"))
 		return
@@ -590,129 +465,10 @@ func (b *backendLinux) updateClampLocked() {
 	b.clampMTU = mtu
 }
 
-// nft_exthdr writes the MSS option unconditionally — unlike pf's max-mss or
-// xt_TCPMSS it would also raise a smaller advertised MSS — so the rule matches
-// only when the advertised MSS exceeds the clamp value.
-func (b *backendLinux) setupClampRules(mtu int) error {
-	nft, err := nftables.New()
-	if err != nil {
-		return err
+func (b *backendLinux) egressMTU(egress string) int {
+	iface, err := b.networkManager.InterfaceFinder().ByName(egress)
+	if err != nil || iface.MTU < 576 || iface.MTU > bridgeTunMTU {
+		return bridgeTunMTU
 	}
-	table := &nftables.Table{
-		Family: nftables.TableFamilyINet,
-		Name:   b.nftTableName,
-	}
-	chain := &nftables.Chain{
-		Name:  "forward",
-		Table: table,
-	}
-	nft.FlushChain(chain)
-	families := []struct {
-		protocol   byte
-		port       netip.Addr
-		headerSize int
-	}{
-		{unix.NFPROTO_IPV4, b.inet4Port, 40},
-		{unix.NFPROTO_IPV6, b.inet6Port, 60},
-	}
-	for _, family := range families {
-		if !family.port.IsValid() {
-			continue
-		}
-		clamp := binaryutil.BigEndian.PutUint16(uint16(mtu - family.headerSize))
-		nft.AddRule(&nftables.Rule{
-			Table: table,
-			Chain: chain,
-			Exprs: []expr.Any{
-				&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{family.protocol}},
-				&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: nftIfname(b.tunName)},
-				&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
-				&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 13, Len: 1},
-				&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 1, Mask: []byte{0x02}, Xor: []byte{0x00}},
-				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x02}},
-				&expr.Exthdr{DestRegister: 1, Type: 2, Offset: 2, Len: 2, Op: expr.ExthdrOpTcpopt},
-				&expr.Cmp{Op: expr.CmpOpGt, Register: 1, Data: clamp},
-				&expr.Immediate{Register: 1, Data: clamp},
-				&expr.Exthdr{SourceRegister: 1, Type: 2, Offset: 2, Len: 2, Op: expr.ExthdrOpTcpopt},
-			},
-		})
-	}
-	return nft.Flush()
-}
-
-func (b *backendLinux) cleanupNftables() {
-	nft, err := nftables.New()
-	if err != nil {
-		return
-	}
-	table, err := nft.ListTableOfFamily(b.nftTableName, nftables.TableFamilyINet)
-	if err != nil || table == nil {
-		return
-	}
-	nft.DelTable(table)
-	_ = nft.Flush()
-}
-
-func fullConeSupported() bool {
-	fullConeProbeOnce.Do(func() {
-		fullConeProbeResult = probeFullCone()
-	})
-	return fullConeProbeResult
-}
-
-const fullConeProbeTable = "sing-box-fullcone-probe"
-
-// The kernel loads and validates the expression's module when the batch commits:
-// a clean flush means the verb is available, a rejected one rolls back atomically.
-func probeFullCone() bool {
-	deleteFullConeProbe()
-	nft, err := nftables.New()
-	if err != nil {
-		return false
-	}
-	table := nft.AddTable(&nftables.Table{
-		Family: nftables.TableFamilyINet,
-		Name:   fullConeProbeTable,
-	})
-	chain := nft.AddChain(&nftables.Chain{
-		Name:     "postrouting",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookPostrouting,
-		Priority: nftables.ChainPriorityNATSource,
-	})
-	nft.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: chain,
-		Exprs: []expr.Any{
-			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: nftIfname("sing-box-probe0")},
-			&expr.FullCone{},
-		},
-	})
-	supported := nft.Flush() == nil
-	deleteFullConeProbe()
-	return supported
-}
-
-func deleteFullConeProbe() {
-	nft, err := nftables.New()
-	if err != nil {
-		return
-	}
-	table, err := nft.ListTableOfFamily(fullConeProbeTable, nftables.TableFamilyINet)
-	if err != nil || table == nil {
-		return
-	}
-	nft.DelTable(table)
-	_ = nft.Flush()
-}
-
-func nftIfname(name string) []byte {
-	padded := make([]byte, 16)
-	copy(padded, name)
-	return padded
+	return iface.MTU
 }

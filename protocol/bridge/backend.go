@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 )
@@ -42,6 +43,9 @@ type backendBase struct {
 	egressAccess      sync.Mutex
 	forwardingRestore []sysctlState
 	unregister        func()
+
+	session       adapter.BridgeSession
+	currentEgress string
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -93,6 +97,56 @@ func (b *backendBase) DetachReturn(returnPath tun.Return) error {
 	}
 	b.returnPaths = returnPaths
 	return nil
+}
+
+func (b *backendBase) registerMonitors(syncFunc func()) {
+	var unregisterFuncs []func()
+	networkMonitor := b.networkManager.NetworkMonitor()
+	if networkMonitor != nil {
+		networkElement := networkMonitor.RegisterCallback(syncFunc)
+		unregisterFuncs = append(unregisterFuncs, func() { networkMonitor.UnregisterCallback(networkElement) })
+	} else if b.boundInterface != "" {
+		b.logger.Debug("network monitor unavailable, pinned egress will not track interface changes")
+	}
+	if b.boundInterface == "" {
+		interfaceMonitor := b.networkManager.InterfaceMonitor()
+		if interfaceMonitor != nil {
+			interfaceElement := interfaceMonitor.RegisterCallback(func(_ *control.Interface, _ int) { syncFunc() })
+			unregisterFuncs = append(unregisterFuncs, func() { interfaceMonitor.UnregisterCallback(interfaceElement) })
+		}
+	}
+	if len(unregisterFuncs) > 0 {
+		b.unregister = func() {
+			for _, unregisterFunc := range unregisterFuncs {
+				unregisterFunc()
+			}
+		}
+	}
+}
+
+func (b *backendBase) syncSessionEgress() {
+	b.egressAccess.Lock()
+	defer b.egressAccess.Unlock()
+	select {
+	case <-b.closed:
+		return
+	default:
+	}
+	egress := b.resolveEgress()
+	if egress == b.currentEgress {
+		return
+	}
+	err := b.session.SetEgress(egress)
+	if err != nil {
+		b.logger.Debug(E.Cause(err, "apply bridge egress ", egress))
+		return
+	}
+	b.currentEgress = egress
+	if egress == "" {
+		b.logger.Debug("bridge egress unavailable, dropping forwarded traffic")
+	} else {
+		b.logger.Debug("bridge egress ", egress)
+	}
 }
 
 func (b *backendBase) resolveEgress() string {

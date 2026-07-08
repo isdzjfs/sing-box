@@ -12,5 +12,5 @@ import (
 )
 
 func newBackend(ctx context.Context, logger logger.ContextLogger, networkManager adapter.NetworkManager, tag string, options option.BridgeOutboundOptions) (Backend, error) {
-	return nil, E.New("bridge outbound is only supported on Linux and macOS")
+	return nil, E.New("bridge outbound is only supported on Linux, macOS, Android with ROOT and jailbroken iOS")
 }
