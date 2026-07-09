@@ -105,6 +105,10 @@ func (s *URLTest) All() []string {
 	return s.tags
 }
 
+func (s *URLTest) InterruptsExternalConnections() bool {
+	return s.interruptExternalConnections || s.group != nil && s.group.interruptExternalConnections
+}
+
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
 	return s.group.URLTest(ctx)
 }

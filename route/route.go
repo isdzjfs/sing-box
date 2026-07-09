@@ -454,6 +454,9 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 		if !isGroup {
 			break
 		}
+		if interruptibleGroup, isInterruptible := outbound.(adapter.InterruptibleOutboundGroup); isInterruptible && interruptibleGroup.InterruptsExternalConnections() {
+			return continueResult
+		}
 		selectedOutbound, selectedLoaded := r.outbound.Outbound(group.Now())
 		if !selectedLoaded {
 			return continueResult

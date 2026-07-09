@@ -130,6 +130,10 @@ type OutboundGroup interface {
 	All() []string
 }
 
+type InterruptibleOutboundGroup interface {
+	InterruptsExternalConnections() bool
+}
+
 type URLTestGroup interface {
 	OutboundGroup
 	URLTest(ctx context.Context) (map[string]uint16, error)
