@@ -3,6 +3,7 @@ package obfs
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -32,6 +33,7 @@ type httpConn struct {
 	hasSentHeader bool
 	hasRecvHeader bool
 	buf           []byte
+	headerBuf     bytes.Buffer
 }
 
 func (h *httpObfs) StreamConn(c net.Conn) net.Conn {
@@ -53,23 +55,36 @@ func (c *httpConn) Read(b []byte) (int, error) {
 		return c.Conn.Read(b)
 	}
 
-	buf := pool.Get(pool.RelayBufferSize)
-	defer pool.Put(buf)
-	n, err := c.Conn.Read(buf)
-	if err != nil {
-		return 0, err
+	readBuf := pool.Get(pool.RelayBufferSize)
+	defer pool.Put(readBuf)
+	for {
+		n, err := c.Conn.Read(readBuf)
+		if n > 0 {
+			_, _ = c.headerBuf.Write(readBuf[:n])
+			if pos := bytes.Index(c.headerBuf.Bytes(), []byte("\r\n\r\n")); pos >= 0 {
+				payload := c.headerBuf.Bytes()[pos+4:]
+				c.hasRecvHeader = true
+				copied := copy(b, payload)
+				if copied < len(payload) {
+					c.buf = append(c.buf, payload[copied:]...)
+				}
+				c.headerBuf.Reset()
+				if copied > 0 {
+					return copied, nil
+				}
+				return c.Conn.Read(b)
+			}
+			if c.headerBuf.Len() > pool.RelayBufferSize {
+				return 0, errors.New("http obfs response header is too large")
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && c.headerBuf.Len() > 0 {
+				return 0, io.ErrUnexpectedEOF
+			}
+			return 0, err
+		}
 	}
-	pos := bytes.Index(buf[:n], []byte("\r\n\r\n"))
-	if pos == -1 {
-		return 0, io.EOF
-	}
-	c.hasRecvHeader = true
-	dataLength := n - pos - 4
-	n = copy(b, buf[4+pos:n])
-	if dataLength > n {
-		c.buf = append(c.buf, buf[4+pos+n:4+pos+dataLength]...)
-	}
-	return n, nil
 }
 
 func (c *httpConn) Write(b []byte) (int, error) {

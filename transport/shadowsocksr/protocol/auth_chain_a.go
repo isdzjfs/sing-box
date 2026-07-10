@@ -180,13 +180,17 @@ func (a *authChainA) DecodePacket(b []byte) ([]byte, error) {
 	md5Data := tools.HmacMD5(a.Key, b[len(b)-8:len(b)-1])
 
 	randDataLength := udpGetRandLength(md5Data, &a.randomServer)
+	payloadLength := len(b) - 8 - randDataLength
+	if payloadLength < 0 {
+		return nil, errAuthChainLengthError
+	}
 
 	key := core.Kdf(base64.StdEncoding.EncodeToString(a.userKey)+base64.StdEncoding.EncodeToString(md5Data), 16)
 	rc4Cipher, err := rc4.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	wantedData := b[:len(b)-8-randDataLength]
+	wantedData := b[:payloadLength]
 	rc4Cipher.XORKeyStream(wantedData, wantedData)
 	return wantedData, nil
 }

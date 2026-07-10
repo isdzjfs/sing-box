@@ -71,9 +71,12 @@ func (emptyAddr) Network() string { return "xhttp" }
 func (emptyAddr) String() string  { return "xhttp" }
 
 type waitReadCloser struct {
-	wait chan struct{}
-	once sync.Once
-	io.ReadCloser
+	access sync.Mutex
+	wait   chan struct{}
+	once   sync.Once
+	reader io.ReadCloser
+	err    error
+	closed bool
 }
 
 func newWaitReadCloser() *waitReadCloser {
@@ -81,31 +84,61 @@ func newWaitReadCloser() *waitReadCloser {
 }
 
 func (w *waitReadCloser) Set(reader io.ReadCloser) {
-	w.ReadCloser = reader
+	w.access.Lock()
+	if w.closed {
+		w.access.Unlock()
+		_ = reader.Close()
+		return
+	}
+	w.reader = reader
+	w.access.Unlock()
+	w.signal()
+}
+
+func (w *waitReadCloser) SetError(err error) {
+	if err == nil {
+		err = io.ErrClosedPipe
+	}
+	w.access.Lock()
+	if w.reader == nil && w.err == nil {
+		w.err = err
+	}
+	w.access.Unlock()
+	w.signal()
+}
+
+func (w *waitReadCloser) signal() {
 	w.once.Do(func() {
 		close(w.wait)
 	})
 }
 
 func (w *waitReadCloser) Read(b []byte) (int, error) {
-	if w.ReadCloser == nil {
-		<-w.wait
-		if w.ReadCloser == nil {
-			return 0, io.ErrClosedPipe
+	<-w.wait
+	w.access.Lock()
+	reader := w.reader
+	err := w.err
+	w.access.Unlock()
+	if reader == nil {
+		if err == nil {
+			err = io.ErrClosedPipe
 		}
+		return 0, err
 	}
-	return w.ReadCloser.Read(b)
+	return reader.Read(b)
 }
 
 func (w *waitReadCloser) Close() error {
-	if w.ReadCloser != nil {
-		return w.ReadCloser.Close()
+	w.access.Lock()
+	w.closed = true
+	reader := w.reader
+	if reader == nil && w.err == nil {
+		w.err = io.ErrClosedPipe
 	}
-	w.once.Do(func() {
-		close(w.wait)
-	})
-	if w.ReadCloser != nil {
-		return w.ReadCloser.Close()
+	w.access.Unlock()
+	w.signal()
+	if reader != nil {
+		return reader.Close()
 	}
 	return nil
 }

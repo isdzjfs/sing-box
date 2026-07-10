@@ -422,11 +422,14 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		}
 		return conn, nil
 	}
-	go c.postPacketLoop(requestCtx, reader, sessionID, c.primary, primaryClient, primaryXMux)
+	go c.postPacketLoop(requestCtx, reader, sessionID, c.primary, primaryClient, primaryXMux, func(err error) {
+		_ = readCloser.Close()
+		release()
+	})
 	return conn, nil
 }
 
-func (c *Client) postPacketLoop(ctx context.Context, reader io.Reader, sessionID string, endpoint *clientEndpoint, dynamicClient dialerClient, dynamicXMux *xmuxClient) {
+func (c *Client) postPacketLoop(ctx context.Context, reader *io.PipeReader, sessionID string, endpoint *clientEndpoint, dynamicClient dialerClient, dynamicXMux *xmuxClient, onError func(error)) {
 	maxUploadSize := int(c.config.normalizedScMaxEachPostBytes().rand())
 	if maxUploadSize <= 0 {
 		maxUploadSize = 1
@@ -455,6 +458,8 @@ func (c *Client) postPacketLoop(ctx context.Context, reader io.Reader, sessionID
 			postErr := dynamicClient.PostPacket(ctx, endpoint.requestURL.String(), sessionID, strconv.FormatInt(seq, 10), payload)
 			seq++
 			if postErr != nil {
+				_ = reader.CloseWithError(postErr)
+				onError(postErr)
 				return
 			}
 		}
@@ -472,6 +477,7 @@ func (c *xhttpClient) OpenStream(ctx context.Context, rawURL string, sessionID s
 	var remoteAddr net.Addr
 	var localAddr net.Addr
 	gotConn := make(chan struct{})
+	earlyError := make(chan error, 1)
 	var gotConnOnce sync.Once
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(connInfo httptrace.GotConnInfo) {
@@ -497,11 +503,12 @@ func (c *xhttpClient) OpenStream(ctx context.Context, rawURL string, sessionID s
 	go func() {
 		response, err := c.roundTrip(request)
 		if err != nil {
+			waitReader.SetError(err)
+			earlyError <- err
 			gotConnOnce.Do(func() {
 				close(gotConn)
 			})
 			common.Close(body)
-			waitReader.Close()
 			return
 		}
 		if response.StatusCode != http.StatusOK || uploadOnly {
@@ -514,6 +521,12 @@ func (c *xhttpClient) OpenStream(ctx context.Context, rawURL string, sessionID s
 		waitReader.Set(response.Body)
 	}()
 	<-gotConn
+	select {
+	case err = <-earlyError:
+		_ = waitReader.Close()
+		return nil, nil, nil, err
+	default:
+	}
 	return waitReader, remoteAddr, localAddr, nil
 }
 

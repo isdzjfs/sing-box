@@ -2,15 +2,85 @@ package v2rayxhttp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
+
+func TestXHTTPOpenStreamReturnsConnectionError(t *testing.T) {
+	expectedErr := errors.New("dial failed")
+	client := &xhttpClient{
+		config: &config{},
+		transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, expectedErr
+		}),
+	}
+
+	_, _, _, err := client.OpenStream(context.Background(), "http://example.com/", "", nil, false)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected connection error %v, got %v", expectedErr, err)
+	}
+}
+
+func TestXHTTPPacketUploadFailureUnblocksWriter(t *testing.T) {
+	expectedErr := errors.New("upload failed")
+	client := &Client{config: &config{}}
+	reader, writer := io.Pipe()
+	errorHandled := make(chan error, 1)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		client.postPacketLoop(
+			context.Background(),
+			reader,
+			"session",
+			&clientEndpoint{},
+			failingDialerClient{err: expectedErr},
+			nil,
+			func(err error) { errorHandled <- err },
+		)
+	}()
+
+	firstWrite := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("ping"))
+		firstWrite <- err
+	}()
+	select {
+	case err := <-firstWrite:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial packet upload write blocked")
+	}
+	select {
+	case err := <-errorHandled:
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected upload error %v, got %v", expectedErr, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upload failure was not handled")
+	}
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("packet upload loop did not stop")
+	}
+
+	_, err := writer.Write([]byte("again"))
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected subsequent write to fail with %v, got %v", expectedErr, err)
+	}
+}
 
 func TestXHTTPStreamOne(t *testing.T) {
 	server, err := NewServer(context.Background(), testLogger{}, option.V2RayXHTTPOptions{
@@ -217,3 +287,24 @@ func (testLogger) Level() int                                    { return 0 }
 func (testLogger) SetLevel(level int)                            {}
 
 var _ adapter.V2RayServerTransportHandler = testHandler{}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type failingDialerClient struct {
+	err error
+}
+
+func (failingDialerClient) IsClosed() bool { return false }
+func (failingDialerClient) Close() error   { return nil }
+
+func (c failingDialerClient) OpenStream(context.Context, string, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error) {
+	return nil, nil, nil, c.err
+}
+
+func (c failingDialerClient) PostPacket(context.Context, string, string, string, []byte) error {
+	return c.err
+}

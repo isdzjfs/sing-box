@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 
@@ -48,6 +49,22 @@ func (c *tls12TicketConn) Read(b []byte) (int, error) {
 	if c.decoded.Len() > 0 {
 		return c.decoded.Read(b)
 	}
+	if c.handshakeStatus != 8 {
+		// The server handshake has a fixed 76-byte layout. ReadFull keeps TCP
+		// fragmentation (and coalesced application records) from changing it.
+		const serverHandshakeSize = 11 + 32 + 1 + 32
+		handshake := pool.Get(serverHandshakeSize)
+		defer pool.Put(handshake)
+		if _, err := io.ReadFull(c.Conn, handshake); err != nil {
+			return 0, err
+		}
+		if !hmac.Equal(handshake[33:43], c.hmacSHA1(handshake[11:33])[:10]) ||
+			!hmac.Equal(handshake[len(handshake)-10:], c.hmacSHA1(handshake[:len(handshake)-10])[:10]) {
+			return 0, errTLS12TicketAuthHMACError
+		}
+		_, err := c.Write(nil)
+		return 0, err
+	}
 
 	buf := pool.Get(pool.RelayBufferSize)
 	defer pool.Put(buf)
@@ -56,34 +73,21 @@ func (c *tls12TicketConn) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	if c.handshakeStatus == 8 {
-		c.underDecoded.Write(buf[:n])
-		for c.underDecoded.Len() > 5 {
-			if !bytes.Equal(c.underDecoded.Bytes()[:3], []byte{0x17, 3, 3}) {
-				c.underDecoded.Reset()
-				return 0, errTLS12TicketAuthIncorrectMagicNumber
-			}
-			size := int(binary.BigEndian.Uint16(c.underDecoded.Bytes()[3:5]))
-			if c.underDecoded.Len() < 5+size {
-				break
-			}
-			c.underDecoded.Next(5)
-			c.decoded.Write(c.underDecoded.Next(size))
+	c.underDecoded.Write(buf[:n])
+	for c.underDecoded.Len() > 5 {
+		if !bytes.Equal(c.underDecoded.Bytes()[:3], []byte{0x17, 3, 3}) {
+			c.underDecoded.Reset()
+			return 0, errTLS12TicketAuthIncorrectMagicNumber
 		}
-		n, _ = c.decoded.Read(b)
-		return n, nil
+		size := int(binary.BigEndian.Uint16(c.underDecoded.Bytes()[3:5]))
+		if c.underDecoded.Len() < 5+size {
+			break
+		}
+		c.underDecoded.Next(5)
+		c.decoded.Write(c.underDecoded.Next(size))
 	}
-
-	if n < 11+32+1+32 {
-		return 0, errTLS12TicketAuthTooShortData
-	}
-
-	if !hmac.Equal(buf[33:43], c.hmacSHA1(buf[11:33])[:10]) || !hmac.Equal(buf[n-10:n], c.hmacSHA1(buf[:n-10])[:10]) {
-		return 0, errTLS12TicketAuthHMACError
-	}
-
-	c.Write(nil)
-	return 0, nil
+	n, _ = c.decoded.Read(b)
+	return n, nil
 }
 
 func (c *tls12TicketConn) Write(b []byte) (int, error) {
