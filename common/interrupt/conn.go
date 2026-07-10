@@ -22,6 +22,7 @@ type Conn struct {
 	net.Conn
 	group   *Group
 	element *list.Element[*groupConnItem]
+	closed  bool
 }
 
 /*func (c *Conn) MarkAsInternal() {
@@ -30,9 +31,27 @@ type Conn struct {
 
 func (c *Conn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
-	c.group.connections.Remove(c.element)
+	if c.element != nil {
+		c.group.connections.Remove(c.element)
+		c.element = nil
+	}
+	c.closed = true
+	c.group.access.Unlock()
 	return c.Conn.Close()
+}
+
+func (c *Conn) RegisterGeneration(isExternal bool, generation uint64) {
+	c.group.access.Lock()
+	defer c.group.access.Unlock()
+	if c.closed {
+		return
+	}
+	if c.element == nil {
+		c.element = c.group.connections.PushBack(&groupConnItem{c.Conn, isExternal, generation})
+		return
+	}
+	c.element.Value.isExternal = isExternal
+	c.element.Value.generation = generation
 }
 
 func (c *Conn) ReaderReplaceable() bool {
@@ -51,6 +70,7 @@ type PacketConn struct {
 	net.PacketConn
 	group   *Group
 	element *list.Element[*groupConnItem]
+	closed  bool
 }
 
 /*func (c *PacketConn) MarkAsInternal() {
@@ -59,9 +79,27 @@ type PacketConn struct {
 
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
-	c.group.connections.Remove(c.element)
+	if c.element != nil {
+		c.group.connections.Remove(c.element)
+		c.element = nil
+	}
+	c.closed = true
+	c.group.access.Unlock()
 	return c.PacketConn.Close()
+}
+
+func (c *PacketConn) RegisterGeneration(isExternal bool, generation uint64) {
+	c.group.access.Lock()
+	defer c.group.access.Unlock()
+	if c.closed {
+		return
+	}
+	if c.element == nil {
+		c.element = c.group.connections.PushBack(&groupConnItem{c.PacketConn, isExternal, generation})
+		return
+	}
+	c.element.Value.isExternal = isExternal
+	c.element.Value.generation = generation
 }
 
 func (c *PacketConn) ReaderReplaceable() bool {
@@ -80,13 +118,32 @@ type NetworkPacketConn struct {
 	N.PacketConn
 	group   *Group
 	element *list.Element[*groupConnItem]
+	closed  bool
 }
 
 func (c *NetworkPacketConn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
-	c.group.connections.Remove(c.element)
+	if c.element != nil {
+		c.group.connections.Remove(c.element)
+		c.element = nil
+	}
+	c.closed = true
+	c.group.access.Unlock()
 	return c.PacketConn.Close()
+}
+
+func (c *NetworkPacketConn) RegisterGeneration(isExternal bool, generation uint64) {
+	c.group.access.Lock()
+	defer c.group.access.Unlock()
+	if c.closed {
+		return
+	}
+	if c.element == nil {
+		c.element = c.group.connections.PushBack(&groupConnItem{c.PacketConn, isExternal, generation})
+		return
+	}
+	c.element.Value.isExternal = isExternal
+	c.element.Value.generation = generation
 }
 
 func (c *NetworkPacketConn) ReaderReplaceable() bool {

@@ -162,7 +162,7 @@ func TestURLTestDiscardsConnectionDialedByStaleOutbound(t *testing.T) {
 	freshOutbound := &testURLTestOutbound{tag: "fresh"}
 	var group *URLTestGroup
 	staleOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-		group.selectedOutboundTCP = freshOutbound
+		setTestSelectedTCP(group, freshOutbound)
 		return staleConn, nil
 	}
 	freshOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -171,7 +171,7 @@ func TestURLTestDiscardsConnectionDialedByStaleOutbound(t *testing.T) {
 	var err error
 	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
 	require.NoError(t, err)
-	group.selectedOutboundTCP = staleOutbound
+	setTestSelectedTCP(group, staleOutbound)
 	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
 
 	conn, err := outbound.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
@@ -193,7 +193,7 @@ func TestURLTestDiscardsPacketConnectionListenedByStaleOutbound(t *testing.T) {
 	freshOutbound := &testURLTestOutbound{tag: "fresh"}
 	var group *URLTestGroup
 	staleOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-		group.selectedOutboundUDP = freshOutbound
+		setTestSelectedUDP(group, freshOutbound)
 		return staleConn, nil
 	}
 	freshOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -202,7 +202,7 @@ func TestURLTestDiscardsPacketConnectionListenedByStaleOutbound(t *testing.T) {
 	var err error
 	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
 	require.NoError(t, err)
-	group.selectedOutboundUDP = staleOutbound
+	setTestSelectedUDP(group, staleOutbound)
 	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
 
 	conn, err := outbound.ListenPacket(context.Background(), M.ParseSocksaddr("example.com:443"))
@@ -214,6 +214,153 @@ func TestURLTestDiscardsPacketConnectionListenedByStaleOutbound(t *testing.T) {
 
 	require.NoError(t, conn.Close())
 	require.True(t, freshConn.Closed())
+}
+
+func TestURLTestRetriesConnectionWhenStaleOutboundDialFails(t *testing.T) {
+	ctx := newTestURLTestContext()
+	freshConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	var group *URLTestGroup
+	staleOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		setTestSelectedTCP(group, freshOutbound)
+		return nil, errors.New("stale dial canceled")
+	}
+	freshOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		return freshConn, nil
+	}
+	var err error
+	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	setTestSelectedTCP(group, staleOutbound)
+	group.history.StoreURLTestHistory("stale", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	conn, err := outbound.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.Equal(t, int32(1), staleOutbound.dialCount.Load())
+	require.Equal(t, int32(1), freshOutbound.dialCount.Load())
+	require.NotNil(t, group.history.LoadURLTestHistory("stale"))
+
+	require.NoError(t, conn.Close())
+	require.True(t, freshConn.Closed())
+}
+
+func TestURLTestRetriesPacketConnectionWhenStaleOutboundListenFails(t *testing.T) {
+	ctx := newTestURLTestContext()
+	freshConn := &testURLTestPacketConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	var group *URLTestGroup
+	staleOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		setTestSelectedUDP(group, freshOutbound)
+		return nil, errors.New("stale packet dial canceled")
+	}
+	freshOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		return freshConn, nil
+	}
+	var err error
+	group, err = NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	setTestSelectedUDP(group, staleOutbound)
+	group.history.StoreURLTestHistory("stale", &adapter.URLTestHistory{
+		Time:  time.Unix(1000, 0),
+		Delay: 10,
+	})
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	conn, err := outbound.ListenPacket(context.Background(), M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.Equal(t, int32(1), staleOutbound.listenCount.Load())
+	require.Equal(t, int32(1), freshOutbound.listenCount.Load())
+	require.NotNil(t, group.history.LoadURLTestHistory("stale"))
+
+	require.NoError(t, conn.Close())
+	require.True(t, freshConn.Closed())
+}
+
+func TestURLTestCancelsStaleDialWhenSelectionChanges(t *testing.T) {
+	ctx := newTestURLTestContext()
+	freshConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	staleDialStarted := make(chan struct{})
+	staleOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		close(staleDialStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	freshOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		return freshConn, nil
+	}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	setTestSelectedTCP(group, staleOutbound)
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult, 1)
+	go func() {
+		conn, err := outbound.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+		resultCh <- dialResult{conn: conn, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-staleDialStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	updated, generation := group.applySelectedUpdate(freshOutbound, true, nil, false)
+	require.True(t, updated)
+	group.interruptGroup.InterruptBefore(generation, true)
+
+	var result dialResult
+	require.Eventually(t, func() bool {
+		select {
+		case result = <-resultCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, result.err)
+	require.Equal(t, int32(1), staleOutbound.dialCount.Load())
+	require.Equal(t, int32(1), freshOutbound.dialCount.Load())
+
+	require.NoError(t, result.conn.Close())
+	require.True(t, freshConn.Closed())
+}
+
+func TestURLTestInterruptSkipsNewGenerationConnections(t *testing.T) {
+	ctx := newTestURLTestContext()
+	oldConn := &testURLTestConn{}
+	newConn := &testURLTestConn{}
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	setTestSelectedTCP(group, staleOutbound)
+
+	_ = group.interruptGroup.NewConnWithGeneration(oldConn, true, 0)
+	updated, generation := group.applySelectedUpdate(freshOutbound, true, nil, false)
+	require.True(t, updated)
+	trackedNewConn := group.interruptGroup.NewConnWithGeneration(newConn, true, generation)
+
+	group.interruptGroup.InterruptBefore(generation, true)
+
+	require.True(t, oldConn.Closed())
+	require.False(t, newConn.Closed())
+	require.NoError(t, trackedNewConn.Close())
+	require.True(t, newConn.Closed())
 }
 
 func TestURLTestInterruptsFallbackConnectionWhenFirstCheckSelectsDifferentOutbound(t *testing.T) {
@@ -270,11 +417,15 @@ func TestURLTestInterruptsFallbackPacketConnectionWhenFirstCheckSelectsDifferent
 	require.Equal(t, freshOutbound, group.selectedOutboundUDP)
 }
 
-func TestURLTestInterruptsTrackedConnectionWhenFirstCheckSelectsOutbound(t *testing.T) {
+func TestURLTestInterruptsTrackedConnectionAfterDialGenerationCommitted(t *testing.T) {
 	ctx := newTestURLTestContext()
 	localConn := &testURLTestConn{}
+	remoteConn := &testURLTestConn{}
 	staleOutbound := &testURLTestOutbound{tag: "stale"}
 	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	freshOutbound.dialFn = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		return remoteConn, nil
+	}
 	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
 	require.NoError(t, err)
 	connectionManager := &testURLTestConnectionManager{}
@@ -290,15 +441,31 @@ func TestURLTestInterruptsTrackedConnectionWhenFirstCheckSelectsOutbound(t *test
 	})
 	group.performUpdateCheck()
 
-	require.True(t, localConn.Closed())
+	require.False(t, localConn.Closed())
 	require.Equal(t, freshOutbound, group.selectedOutboundTCP)
+
+	_, err = connectionManager.this.DialContext(connectionManager.ctx, N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.False(t, localConn.Closed())
+	require.False(t, remoteConn.Closed())
+
+	updated, generation := group.applySelectedUpdate(staleOutbound, true, nil, false)
+	require.True(t, updated)
+	group.interruptGroup.InterruptBefore(generation, true)
+
+	require.True(t, localConn.Closed())
+	require.True(t, remoteConn.Closed())
 }
 
-func TestURLTestInterruptsTrackedPacketConnectionWhenFirstCheckSelectsOutbound(t *testing.T) {
+func TestURLTestInterruptsTrackedPacketConnectionAfterListenGenerationCommitted(t *testing.T) {
 	ctx := newTestURLTestContext()
 	localConn := &testURLTestPacketConn{}
+	remoteConn := &testURLTestPacketConn{}
 	staleOutbound := &testURLTestOutbound{tag: "stale"}
 	freshOutbound := &testURLTestOutbound{tag: "fresh"}
+	freshOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		return remoteConn, nil
+	}
 	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound, freshOutbound}, "", time.Minute, 0, time.Minute, true)
 	require.NoError(t, err)
 	connectionManager := &testURLTestConnectionManager{}
@@ -314,8 +481,20 @@ func TestURLTestInterruptsTrackedPacketConnectionWhenFirstCheckSelectsOutbound(t
 	})
 	group.performUpdateCheck()
 
-	require.True(t, localConn.Closed())
+	require.False(t, localConn.Closed())
 	require.Equal(t, freshOutbound, group.selectedOutboundUDP)
+
+	_, err = connectionManager.this.ListenPacket(connectionManager.ctx, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	require.False(t, localConn.Closed())
+	require.False(t, remoteConn.Closed())
+
+	updated, generation := group.applySelectedUpdate(nil, false, staleOutbound, true)
+	require.True(t, updated)
+	group.interruptGroup.InterruptBefore(generation, true)
+
+	require.True(t, localConn.Closed())
+	require.True(t, remoteConn.Closed())
 }
 
 func newTestURLTestContext() context.Context {
@@ -323,6 +502,18 @@ func newTestURLTestContext() context.Context {
 	ctx = service.ContextWithPtr(ctx, urltest.NewHistoryStorage())
 	ctx = pause.WithDefaultManager(ctx)
 	return ctx
+}
+
+func setTestSelectedTCP(group *URLTestGroup, outbound adapter.Outbound) {
+	group.selectedAccess.Lock()
+	defer group.selectedAccess.Unlock()
+	group.selectedOutboundTCP = outbound
+}
+
+func setTestSelectedUDP(group *URLTestGroup, outbound adapter.Outbound) {
+	group.selectedAccess.Lock()
+	defer group.selectedAccess.Unlock()
+	group.selectedOutboundUDP = outbound
 }
 
 type testURLTestConn struct {
@@ -428,6 +619,8 @@ func (m *testURLTestOutboundManager) Default() adapter.Outbound {
 }
 
 type testURLTestConnectionManager struct {
+	ctx        context.Context
+	this       N.Dialer
 	conn       net.Conn
 	packetConn N.PacketConn
 }
@@ -456,10 +649,14 @@ func (m *testURLTestConnectionManager) TrackPacketConn(conn net.PacketConn) net.
 }
 
 func (m *testURLTestConnectionManager) NewConnection(ctx context.Context, this N.Dialer, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	m.ctx = ctx
+	m.this = this
 	m.conn = conn
 }
 
 func (m *testURLTestConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	m.ctx = ctx
+	m.this = this
 	m.packetConn = conn
 }
 
