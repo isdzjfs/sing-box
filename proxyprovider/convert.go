@@ -57,6 +57,9 @@ func convertProxy(provider option.ProxyProvider, proxy map[string]any, usedTags 
 	case "ss", "shadowsocks":
 		outboundType = C.TypeShadowsocks
 		converter = func() (any, error) { return convertShadowsocks(provider, proxy, domainResolver) }
+	case "ssr", "shadowsocksr":
+		outboundType = C.TypeShadowsocksR
+		converter = func() (any, error) { return convertShadowsocksR(provider, proxy, domainResolver) }
 	case "snell":
 		outboundType = C.TypeSnell
 		converter = func() (any, error) { return convertSnell(provider, proxy, domainResolver) }
@@ -167,6 +170,26 @@ func convertShadowsocks(provider option.ProxyProvider, proxy map[string]any, dom
 	}
 	if pluginOptions := pluginOptions(proxy); pluginOptions != "" {
 		options.PluginOptions = pluginOptions
+	}
+	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
+}
+
+func convertShadowsocksR(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.ShadowsocksROutboundOptions, error) {
+	options := &option.ShadowsocksROutboundOptions{
+		ServerOptions: serverOptions(proxy),
+		Method:        stringValue(proxy, "cipher", "method"),
+		Password:      stringValue(proxy, "password"),
+		Obfs:          stringValue(proxy, "obfs"),
+		ObfsParam:     stringValue(proxy, "obfs-param", "obfs_param", "obfsparam"),
+		Protocol:      stringValue(proxy, "protocol"),
+		ProtocolParam: stringValue(proxy, "protocol-param", "protocol_param", "protoparam"),
+		Network:       networkList(provider, proxy),
+	}
+	if options.Method == "" {
+		return nil, E.New("missing cipher")
+	}
+	if options.Password == "" {
+		return nil, E.New("missing password")
 	}
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
 }

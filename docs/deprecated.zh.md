@@ -175,7 +175,7 @@ sing-box 1.8.0 引入了[规则集](/zh/configuration/rule-set/)，
 
 #### ShadowsocksR
 
-ShadowsocksR 支持从未默认启用，自从常用的黑产代理销售面板停止使用该协议，继续维护它是没有意义的。
+ShadowsocksR 入站支持仍已移除。
 
 #### Proxy Protocol
 

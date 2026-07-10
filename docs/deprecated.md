@@ -182,8 +182,7 @@ The following features will be marked deprecated in 1.5.0 and removed entirely i
 
 #### ShadowsocksR
 
-ShadowsocksR support has never been enabled by default, since the most commonly used proxy sales panel in the
-illegal industry stopped using this protocol, it does not make sense to continue to maintain it.
+ShadowsocksR inbound support remains removed.
 
 #### Proxy Protocol
 

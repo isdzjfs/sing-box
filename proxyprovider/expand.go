@@ -454,6 +454,10 @@ func parseURIListSubscription(content []byte) subscriptionFile {
 				if proxy := proxyFromTUICURI(uri); proxy != nil {
 					subscription.Proxies = append(subscription.Proxies, proxy)
 				}
+			case "ssr":
+				if proxy := proxyFromSSRURI(line); proxy != nil {
+					subscription.Proxies = append(subscription.Proxies, proxy)
+				}
 			}
 		}
 		if len(subscription.Proxies) > 0 {
@@ -484,6 +488,127 @@ func decodeBase64Subscription(content []byte) (string, bool) {
 		decoded, err := encoding.DecodeString(compact)
 		if err == nil && strings.Contains(string(decoded), "://") {
 			return string(decoded), true
+		}
+	}
+	return "", false
+}
+
+func proxyFromSSRURI(line string) map[string]any {
+	_, body, ok := strings.Cut(strings.TrimSpace(line), "://")
+	if !ok {
+		return nil
+	}
+	decoded, ok := decodeSSRBase64(body)
+	if !ok {
+		return nil
+	}
+	before, after, ok := strings.Cut(decoded, "/?")
+	if !ok {
+		return nil
+	}
+	host, port, protocol, method, obfsName, passwordEncoded, ok := splitSSRMainFields(before)
+	if !ok {
+		return nil
+	}
+	password, ok := decodeSSRBase64(passwordEncoded)
+	if !ok {
+		return nil
+	}
+	query, err := url.ParseQuery(strings.NewReplacer("+", "-", "/", "_").Replace(after))
+	if err != nil {
+		return nil
+	}
+	name := decodeSSRQueryValue(query, "remarks")
+	if name == "" {
+		name = host
+	}
+	proxy := map[string]any{
+		"name":     name,
+		"type":     "ssr",
+		"server":   host,
+		"port":     port,
+		"cipher":   method,
+		"password": password,
+		"obfs":     obfsName,
+		"protocol": protocol,
+		"udp":      true,
+	}
+	if obfsParam := decodeSSRQueryValue(query, "obfsparam"); obfsParam != "" {
+		proxy["obfs-param"] = obfsParam
+	}
+	if protocolParam := decodeSSRQueryValue(query, "protoparam"); protocolParam != "" {
+		proxy["protocol-param"] = protocolParam
+	}
+	return proxy
+}
+
+func splitSSRMainFields(before string) (host string, port string, protocol string, method string, obfsName string, password string, ok bool) {
+	parts := make([]string, 0, 5)
+	remaining := before
+	for len(parts) < 5 {
+		separator := strings.LastIndex(remaining, ":")
+		if separator < 0 {
+			return
+		}
+		parts = append(parts, remaining[separator+1:])
+		remaining = remaining[:separator]
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(remaining, "]"), "[")
+	port = parts[4]
+	protocol = parts[3]
+	method = parts[2]
+	obfsName = parts[1]
+	password = parts[0]
+	ok = host != "" && port != "" && protocol != "" && method != "" && obfsName != "" && password != ""
+	return
+}
+
+func decodeSSRQueryValue(query url.Values, key string) string {
+	value := query.Get(key)
+	if value == "" {
+		return ""
+	}
+	decoded, ok := decodeSSRBase64(value)
+	if !ok {
+		return ""
+	}
+	return decoded
+}
+
+func decodeSSRBase64(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if unescaped, err := url.PathUnescape(value); err == nil {
+		value = unescaped
+	}
+	candidates := []string{value}
+	if standard := strings.NewReplacer("-", "+", "_", "/").Replace(value); standard != value {
+		candidates = append(candidates, standard)
+	}
+	if urlSafe := strings.NewReplacer("+", "-", "/", "_").Replace(value); urlSafe != value {
+		candidates = append(candidates, urlSafe)
+	}
+	for _, candidate := range candidates {
+		trimmed := strings.TrimRight(candidate, "=")
+		padded := candidate
+		if padding := len(padded) % 4; padding != 0 {
+			padded += strings.Repeat("=", 4-padding)
+		}
+		for _, item := range []struct {
+			encoding *base64.Encoding
+			value    string
+		}{
+			{base64.StdEncoding, padded},
+			{base64.URLEncoding, padded},
+			{base64.RawStdEncoding, trimmed},
+			{base64.RawURLEncoding, trimmed},
+		} {
+			decoded, err := item.encoding.DecodeString(item.value)
+			if err == nil {
+				return string(decoded), true
+			}
 		}
 	}
 	return "", false

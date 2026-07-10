@@ -212,6 +212,16 @@ proxies:
     port: 8388
     cipher: aes-128-gcm
     password: ss-pass
+  - name: SSR
+    type: ssr
+    server: ssr.example.com
+    port: 8388
+    cipher: aes-256-cfb
+    password: ssr-pass
+    obfs: tls1.2_ticket_auth
+    obfs-param: cdn.example.com
+    protocol: auth_chain_a
+    protocol-param: "123:ssr-proto-pass"
   - name: VMess
     type: vmess
     server: vmess.example.com
@@ -241,6 +251,7 @@ proxies:
 		"Trojan": C.TypeTrojan,
 		"HY2":    C.TypeHysteria2,
 		"SS":     C.TypeShadowsocks,
+		"SSR":    C.TypeShadowsocksR,
 		"VMess":  C.TypeVMess,
 	}
 	if len(selectorOptions.Outbounds) != len(wantTypes) {
@@ -257,6 +268,13 @@ proxies:
 	}
 	if len(hy2Options.ServerPorts) != 1 || hy2Options.ServerPorts[0] != "60000:65530" {
 		t.Fatalf("server ports = %#v, want 60000:65530", hy2Options.ServerPorts)
+	}
+	ssrOptions := options.Outbounds[6].Options.(*option.ShadowsocksROutboundOptions)
+	if ssrOptions.Method != "aes-256-cfb" || ssrOptions.Obfs != "tls1.2_ticket_auth" || ssrOptions.Protocol != "auth_chain_a" {
+		t.Fatalf("unexpected ssr options: %#v", ssrOptions)
+	}
+	if ssrOptions.ObfsParam != "cdn.example.com" || ssrOptions.ProtocolParam != "123:ssr-proto-pass" {
+		t.Fatalf("unexpected ssr params: %#v", ssrOptions)
 	}
 }
 
@@ -657,6 +675,60 @@ tuic://00000000-0000-0000-0000-000000000007:tuic-uri-pass@tuic.example.com:443?s
 	}
 	if len(tuicOptions.TLS.ALPN) != 1 || tuicOptions.TLS.ALPN[0] != "h3" {
 		t.Fatalf("tuic alpn = %#v, want h3", tuicOptions.TLS.ALPN)
+	}
+}
+
+func TestExpandConvertsBase64SSRURIList(t *testing.T) {
+	encodeSSR := func(value string) string {
+		return base64.RawURLEncoding.EncodeToString([]byte(value))
+	}
+	ssrBody := "ssr.example.com:8388:auth_chain_a:aes-256-cfb:tls1.2_ticket_auth:" +
+		encodeSSR("ssr-pass") +
+		"/?obfsparam=" + encodeSSR("cdn.example.com") +
+		"&protoparam=" + encodeSSR("123:ssr-proto-pass") +
+		"&remarks=" + encodeSSR("HK SSR 01")
+	subscriptionPath := writeSubscription(t, base64.StdEncoding.EncodeToString([]byte(`
+REMARKS=example
+ssr://`+encodeSSR(ssrBody)+`
+`)))
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"HK SSR 01"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	generated := options.Outbounds[1]
+	if generated.Type != C.TypeShadowsocksR || generated.Tag != "HK SSR 01" {
+		t.Fatalf("generated outbound = %s/%s", generated.Type, generated.Tag)
+	}
+	ssrOptions := generated.Options.(*option.ShadowsocksROutboundOptions)
+	if ssrOptions.Server != "ssr.example.com" || ssrOptions.ServerPort != 8388 {
+		t.Fatalf("ssr server = %s:%d", ssrOptions.Server, ssrOptions.ServerPort)
+	}
+	if ssrOptions.Method != "aes-256-cfb" || ssrOptions.Password != "ssr-pass" {
+		t.Fatalf("ssr credentials = method:%q password:%q", ssrOptions.Method, ssrOptions.Password)
+	}
+	if ssrOptions.Obfs != "tls1.2_ticket_auth" || ssrOptions.ObfsParam != "cdn.example.com" {
+		t.Fatalf("ssr obfs = obfs:%q param:%q", ssrOptions.Obfs, ssrOptions.ObfsParam)
+	}
+	if ssrOptions.Protocol != "auth_chain_a" || ssrOptions.ProtocolParam != "123:ssr-proto-pass" {
+		t.Fatalf("ssr protocol = protocol:%q param:%q", ssrOptions.Protocol, ssrOptions.ProtocolParam)
+	}
+	if ssrOptions.Network != "" {
+		t.Fatalf("ssr network = %q, want default tcp+udp", ssrOptions.Network)
 	}
 }
 

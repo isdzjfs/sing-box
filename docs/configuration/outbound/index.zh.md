@@ -23,6 +23,7 @@
 | `socks`        | [SOCKS](./socks/)               |
 | `http`         | [HTTP](./http/)                 |
 | `shadowsocks`  | [Shadowsocks](./shadowsocks/)   |
+| `shadowsocksr` | [ShadowsocksR](./shadowsocksr/) |
 | `vmess`        | [VMess](./vmess/)               |
 | `trojan`       | [Trojan](./trojan/)             |
 | `wireguard`    | [Wireguard](./wireguard/)       |
