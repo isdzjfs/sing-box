@@ -2,6 +2,10 @@
 icon: material/alert-decagram
 ---
 
+#### 1.14.0-alpha.42
+
+* Fixes and improvements
+
 #### 1.14.0-alpha.41
 
 * Add windows bridge **1**

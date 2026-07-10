@@ -148,8 +148,8 @@ require (
 	github.com/sagernet/sing-cloudflared v0.1.3-0.20260706062323-d9787e794aa3 // indirect
 	github.com/sagernet/sing-mux v0.3.5 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1 // indirect
-	github.com/sagernet/sing-snell v0.0.0-20260709045721-90e5a65e1f85 // indirect
-	github.com/sagernet/sing-tun v0.8.12-0.20260709141858-8a2ff73b8074 // indirect
+	github.com/sagernet/sing-snell v0.0.0-20260710094516-a4e97ee24beb // indirect
+	github.com/sagernet/sing-tun v0.8.12-0.20260710042924-375e9ae639c5 // indirect
 	github.com/sagernet/sing-usbip v0.0.0-20260616101517-efb91521eddb // indirect
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
