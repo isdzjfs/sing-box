@@ -282,6 +282,77 @@ func TestURLTestRetriesPacketConnectionWhenStaleOutboundListenFails(t *testing.T
 	require.True(t, freshConn.Closed())
 }
 
+func TestURLTestDoesNotCancelPacketDialWhenTCPSelectionChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(newTestURLTestContext())
+	defer cancel()
+
+	packetConn := &testURLTestPacketConn{}
+	packetDialStarted := make(chan struct{}, 1)
+	releasePacketDial := make(chan struct{})
+	udpOutbound := &testURLTestOutbound{tag: "udp"}
+	udpOutbound.listenPacketFn = func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+		select {
+		case packetDialStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releasePacketDial:
+			return packetConn, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	tcpOutbound := &testURLTestOutbound{tag: "tcp"}
+	tcpOutboundNext := &testURLTestOutbound{tag: "tcp-next"}
+	tcpOutboundFinal := &testURLTestOutbound{tag: "tcp-final"}
+
+	group, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), nil, "", time.Minute, 0, time.Minute, true)
+	require.NoError(t, err)
+	setTestSelectedTCP(group, tcpOutbound)
+	setTestSelectedUDP(group, udpOutbound)
+	outbound := &URLTest{group: group, logger: log.NewNOPFactory().Logger()}
+
+	type listenResult struct {
+		conn net.PacketConn
+		err  error
+	}
+	resultCh := make(chan listenResult, 1)
+	go func() {
+		conn, err := outbound.ListenPacket(ctx, M.ParseSocksaddr("example.com:443"))
+		resultCh <- listenResult{conn: conn, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-packetDialStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	updated, generation := group.applySelectedUpdate(tcpOutboundNext, true, nil, false)
+	require.True(t, updated)
+	group.interruptGroup.InterruptBefore(generation, true)
+	updated, generation = group.applySelectedUpdate(tcpOutboundFinal, true, nil, false)
+	require.True(t, updated)
+	group.interruptGroup.InterruptBefore(generation, true)
+
+	close(releasePacketDial)
+	var result listenResult
+	require.Eventually(t, func() bool {
+		select {
+		case result = <-resultCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, result.err)
+	require.Equal(t, int32(1), udpOutbound.listenCount.Load())
+	require.NoError(t, result.conn.Close())
+}
+
 func TestURLTestCancelsStaleDialWhenSelectionChanges(t *testing.T) {
 	ctx := newTestURLTestContext()
 	freshConn := &testURLTestConn{}

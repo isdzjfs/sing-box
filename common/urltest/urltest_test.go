@@ -51,6 +51,39 @@ func TestHistoryStorageKeepsRecentEntries(t *testing.T) {
 	require.Equal(t, uint16(27), latest.Delay)
 }
 
+func TestHistoryStorageDoesNotReplaceCurrentWithOlderResult(t *testing.T) {
+	storage := NewHistoryStorage()
+	baseTime := time.Unix(1000, 0)
+
+	newer := &adapter.URLTestHistory{
+		Time:  baseTime.Add(2 * time.Second),
+		Delay: 20,
+	}
+	storage.StoreURLTestHistory("proxy", newer)
+	storage.StoreURLTestFailure("proxy", baseTime.Add(time.Second))
+
+	current := storage.LoadURLTestHistory("proxy")
+	require.Same(t, newer, current)
+
+	histories := storage.LoadURLTestHistories("proxy")
+	require.Len(t, histories, 2)
+	require.Equal(t, baseTime.Add(time.Second), histories[0].Time)
+	require.Equal(t, newer.Time, histories[1].Time)
+}
+
+func TestHistoryStorageDoesNotRestoreOlderSuccessAfterNewerFailure(t *testing.T) {
+	storage := NewHistoryStorage()
+	baseTime := time.Unix(1000, 0)
+
+	storage.StoreURLTestFailure("proxy", baseTime.Add(2*time.Second))
+	storage.StoreURLTestHistory("proxy", &adapter.URLTestHistory{
+		Time:  baseTime.Add(time.Second),
+		Delay: 10,
+	})
+
+	require.Nil(t, storage.LoadURLTestHistory("proxy"))
+}
+
 func TestHistoryStorageReserveURLTestSkipsDuplicateFailure(t *testing.T) {
 	storage := NewHistoryStorage()
 	baseTime := time.Unix(1000, 0)

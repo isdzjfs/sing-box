@@ -251,9 +251,13 @@ type URLTestGroup struct {
 	selectedAccess               sync.RWMutex
 	selectedOutboundTCP          adapter.Outbound
 	selectedOutboundUDP          adapter.Outbound
+	tcpGeneration                uint64
+	tcpGenerationCtx             context.Context
+	tcpGenerationCancel          context.CancelFunc
+	udpGeneration                uint64
+	udpGenerationCtx             context.Context
+	udpGenerationCancel          context.CancelFunc
 	connectionGeneration         uint64
-	connectionGenerationCtx      context.Context
-	connectionGenerationCancel   context.CancelFunc
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
 	access                       sync.Mutex
@@ -280,7 +284,8 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 	if history == nil {
 		return nil, E.New("missing URL test history storage")
 	}
-	generationCtx, generationCancel := context.WithCancel(ctx)
+	tcpGenerationCtx, tcpGenerationCancel := context.WithCancel(ctx)
+	udpGenerationCtx, udpGenerationCancel := context.WithCancel(ctx)
 	return &URLTestGroup{
 		ctx:                          ctx,
 		outbound:                     outboundManager,
@@ -293,8 +298,10 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		history:                      history,
 		close:                        make(chan struct{}),
 		pause:                        service.FromContext[pause.Manager](ctx),
-		connectionGenerationCtx:      generationCtx,
-		connectionGenerationCancel:   generationCancel,
+		tcpGenerationCtx:             tcpGenerationCtx,
+		tcpGenerationCancel:          tcpGenerationCancel,
+		udpGenerationCtx:             udpGenerationCtx,
+		udpGenerationCancel:          udpGenerationCancel,
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
 	}, nil
@@ -331,9 +338,13 @@ func (g *URLTestGroup) startTickerLocked() {
 
 func (g *URLTestGroup) Close() error {
 	g.selectedAccess.Lock()
-	if g.connectionGenerationCancel != nil {
-		g.connectionGenerationCancel()
-		g.connectionGenerationCancel = nil
+	if g.tcpGenerationCancel != nil {
+		g.tcpGenerationCancel()
+		g.tcpGenerationCancel = nil
+	}
+	if g.udpGenerationCancel != nil {
+		g.udpGenerationCancel()
+		g.udpGenerationCancel = nil
 	}
 	g.selectedAccess.Unlock()
 	g.access.Lock()
@@ -396,11 +407,16 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 func (g *URLTestGroup) selectedOutbound(network string) urlTestOutboundSnapshot {
 	g.selectedAccess.RLock()
 	defer g.selectedAccess.RUnlock()
-	return urlTestOutboundSnapshot{
-		outbound:   g.selectedOutboundLocked(network),
-		generation: g.connectionGeneration,
-		ctx:        g.connectionGenerationCtx,
+	snapshot := urlTestOutboundSnapshot{outbound: g.selectedOutboundLocked(network)}
+	switch network {
+	case N.NetworkTCP:
+		snapshot.generation = g.tcpGeneration
+		snapshot.ctx = g.tcpGenerationCtx
+	case N.NetworkUDP:
+		snapshot.generation = g.udpGeneration
+		snapshot.ctx = g.udpGenerationCtx
 	}
+	return snapshot
 }
 
 func (g *URLTestGroup) selectedOutboundLocked(network string) adapter.Outbound {
@@ -421,7 +437,14 @@ func (g *URLTestGroup) isSelectedOutbound(network string, outbound adapter.Outbo
 }
 
 func (g *URLTestGroup) isSelectedOutboundLocked(network string, outbound adapter.Outbound, generation uint64) bool {
-	if generation != g.connectionGeneration {
+	var currentGeneration uint64
+	switch network {
+	case N.NetworkTCP:
+		currentGeneration = g.tcpGeneration
+	case N.NetworkUDP:
+		currentGeneration = g.udpGeneration
+	}
+	if generation != currentGeneration {
 		return false
 	}
 	selected := g.selectedOutboundLocked(network)
@@ -434,8 +457,8 @@ func (g *URLTestGroup) newSelectedConn(ctx context.Context, network string, outb
 	if !g.isSelectedOutboundLocked(network, outbound, generation) {
 		return nil, false
 	}
-	interrupt.RegisterConnectionFromContext(ctx, isExternal, generation)
-	return g.interruptGroup.NewConnWithGeneration(conn, isExternal, generation), true
+	interrupt.RegisterConnectionFromContext(ctx, isExternal, g.connectionGeneration)
+	return g.interruptGroup.NewConnWithGeneration(conn, isExternal, g.connectionGeneration), true
 }
 
 func (g *URLTestGroup) newSelectedPacketConn(ctx context.Context, network string, outbound adapter.Outbound, generation uint64, conn net.PacketConn, isExternal bool) (net.PacketConn, bool) {
@@ -444,8 +467,8 @@ func (g *URLTestGroup) newSelectedPacketConn(ctx context.Context, network string
 	if !g.isSelectedOutboundLocked(network, outbound, generation) {
 		return nil, false
 	}
-	interrupt.RegisterConnectionFromContext(ctx, isExternal, generation)
-	return g.interruptGroup.NewPacketConnWithGeneration(conn, isExternal, generation), true
+	interrupt.RegisterConnectionFromContext(ctx, isExternal, g.connectionGeneration)
+	return g.interruptGroup.NewPacketConnWithGeneration(conn, isExternal, g.connectionGeneration), true
 }
 
 func (g *URLTestGroup) newPendingInterruptConn(conn net.Conn) *interrupt.Conn {
@@ -559,24 +582,38 @@ func (g *URLTestGroup) applySelectedUpdate(tcpOutbound adapter.Outbound, tcpExis
 	g.selectedAccess.Lock()
 	defer g.selectedAccess.Unlock()
 	var updated bool
+	var tcpUpdated bool
+	var udpUpdated bool
 	if tcpOutbound != nil && (g.selectedOutboundTCP == nil || (tcpExists && tcpOutbound != g.selectedOutboundTCP)) {
 		if g.selectedOutboundTCP != tcpOutbound {
 			updated = true
+			tcpUpdated = true
 		}
 		g.selectedOutboundTCP = tcpOutbound
 	}
 	if udpOutbound != nil && (g.selectedOutboundUDP == nil || (udpExists && udpOutbound != g.selectedOutboundUDP)) {
 		if g.selectedOutboundUDP != udpOutbound {
 			updated = true
+			udpUpdated = true
 		}
 		g.selectedOutboundUDP = udpOutbound
 	}
 	if updated {
-		if g.connectionGenerationCancel != nil {
-			g.connectionGenerationCancel()
+		if tcpUpdated {
+			if g.tcpGenerationCancel != nil {
+				g.tcpGenerationCancel()
+			}
+			g.tcpGeneration++
+			g.tcpGenerationCtx, g.tcpGenerationCancel = context.WithCancel(g.ctx)
+		}
+		if udpUpdated {
+			if g.udpGenerationCancel != nil {
+				g.udpGenerationCancel()
+			}
+			g.udpGeneration++
+			g.udpGenerationCtx, g.udpGenerationCancel = context.WithCancel(g.ctx)
 		}
 		g.connectionGeneration++
-		g.connectionGenerationCtx, g.connectionGenerationCancel = context.WithCancel(g.ctx)
 	}
 	return updated, g.connectionGeneration
 }

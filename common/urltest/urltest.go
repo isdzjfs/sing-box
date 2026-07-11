@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -74,6 +75,9 @@ func (s *HistoryStorage) LoadURLTestHistories(tag string) []*adapter.URLTestHist
 
 func (s *HistoryStorage) appendHistoryLocked(tag string, history *adapter.URLTestHistory) {
 	histories := append(s.delayHistory[tag], history)
+	sort.SliceStable(histories, func(i, j int) bool {
+		return histories[i].Time.Before(histories[j].Time)
+	})
 	if len(histories) > maxHistoryEntries {
 		histories = append([]*adapter.URLTestHistory(nil), histories[len(histories)-maxHistoryEntries:]...)
 	}
@@ -86,6 +90,11 @@ func (s *HistoryStorage) lastHistoryLocked(tag string) *adapter.URLTestHistory {
 		return histories[len(histories)-1]
 	}
 	return s.currentHistory[tag]
+}
+
+func (s *HistoryStorage) isLatestHistoryLocked(tag string, checkedAt time.Time) bool {
+	latest := s.lastHistoryLocked(tag)
+	return latest == nil || !checkedAt.Before(latest.Time)
 }
 
 func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, force bool) bool {
@@ -137,19 +146,27 @@ func (s *HistoryStorage) StoreURLTestFailure(tag string, checkedAt time.Time) {
 		checkedAt = time.Now()
 	}
 	s.access.Lock()
-	delete(s.currentHistory, tag)
-	s.appendHistoryLocked(tag, &adapter.URLTestHistory{
+	history := &adapter.URLTestHistory{
 		Time:  checkedAt,
 		Delay: 0,
-	})
+	}
+	// Commit the current result by probe time, not completion order, so an older
+	// slow probe cannot invalidate a newer result.
+	if s.isLatestHistoryLocked(tag, checkedAt) {
+		delete(s.currentHistory, tag)
+	}
+	s.appendHistoryLocked(tag, history)
 	s.notifyUpdated()
 	s.access.Unlock()
 }
 
 func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
-	s.currentHistory[tag] = history
+	isLatest := s.isLatestHistoryLocked(tag, history.Time)
 	s.appendHistoryLocked(tag, history)
+	if isLatest {
+		s.currentHistory[tag] = history
+	}
 	s.notifyUpdated()
 	s.access.Unlock()
 }
