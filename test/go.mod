@@ -89,6 +89,7 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mdlayher/netlink v1.9.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
+	github.com/metacubex/chacha v0.1.5 // indirect
 	github.com/metacubex/utls v1.8.4 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
@@ -149,11 +150,11 @@ require (
 	github.com/sagernet/sing-mux v0.3.5 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1 // indirect
 	github.com/sagernet/sing-snell v0.0.0-20260710094516-a4e97ee24beb // indirect
-	github.com/sagernet/sing-tun v0.8.12-0.20260710042924-375e9ae639c5 // indirect
+	github.com/sagernet/sing-tun v0.8.12-0.20260710165757-8c8594272daa // indirect
 	github.com/sagernet/sing-usbip v0.0.0-20260616101517-efb91521eddb // indirect
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
-	github.com/sagernet/tailscale v1.92.4-sing-box-1.13-mod.7.0.20260706062137-ae2dde1295a3 // indirect
+	github.com/sagernet/tailscale v1.92.4-sing-box-1.13-mod.7.0.20260711004045-7d3e867147ad // indirect
 	github.com/sagernet/wireguard-go v0.0.5-0.20260706153856-2c27bbf4f97f // indirect
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20231202035212-d3fa0460f47e // indirect

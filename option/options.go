@@ -21,6 +21,7 @@ type _Options struct {
 	HTTPClients           []HTTPClient          `json:"http_clients,omitempty"`
 	ProxyProviderDefaults *ProxyProvider        `json:"proxy-provider-defaults,omitempty"`
 	ProxyProviders        ProxyProviderMap      `json:"proxy-providers,omitempty"`
+	NetworkNamespaces     []NetworkNamespace    `json:"network_namespaces,omitempty"`
 	Endpoints             []Endpoint            `json:"endpoints,omitempty"`
 	Inbounds              []Inbound             `json:"inbounds,omitempty"`
 	Outbounds             []Outbound            `json:"outbounds,omitempty"`
