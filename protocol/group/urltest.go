@@ -127,6 +127,10 @@ func (s *URLTest) All() []string {
 	return s.tags
 }
 
+func (s *URLTest) TestURL() string {
+	return s.link
+}
+
 func (s *URLTest) InterruptsExternalConnections() bool {
 	return s.interruptExternalConnections || s.group != nil && s.group.interruptExternalConnections
 }

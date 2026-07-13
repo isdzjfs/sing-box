@@ -590,15 +590,19 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	if !isOutboundGroup {
 		return nil, status.Error(codes.InvalidArgument, "outbound is not a group: "+groupTag)
 	}
+	urlTest, isURLTest := abstractOutboundGroup.(*group.URLTest)
+	testURL := ""
+	if isURLTest {
+		testURL = urlTest.TestURL()
+	}
 	if request.ItemTag != "" {
 		outboundToTest, err := outboundInGroup(boxService, outboundGroup, groupTag, request.ItemTag)
 		if err != nil {
 			return nil, err
 		}
-		go runURLTest(boxService.ctx, boxService.urlTestHistoryStorage, outboundToTest)
+		go runURLTest(boxService.ctx, boxService.urlTestHistoryStorage, outboundToTest, testURL)
 		return &emptypb.Empty{}, nil
 	}
-	urlTest, isURLTest := abstractOutboundGroup.(*group.URLTest)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
 	} else {
@@ -619,7 +623,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 			outboundToTest := detour
 			outboundTag := outboundToTest.Tag()
 			b.Go(outboundTag, func() (any, error) {
-				runURLTest(boxService.ctx, historyStorage, outboundToTest)
+				runURLTest(boxService.ctx, historyStorage, outboundToTest, testURL)
 				return nil, nil
 			})
 		}
@@ -644,9 +648,9 @@ func outboundInGroup(boxService *Instance, outboundGroup adapter.OutboundGroup, 
 	return nil, status.Error(codes.NotFound, "outbound item not found in group "+groupTag+": "+itemTag)
 }
 
-func runURLTest(ctx context.Context, historyStorage *urltest.HistoryStorage, outboundToTest adapter.Outbound) {
+func runURLTest(ctx context.Context, historyStorage *urltest.HistoryStorage, outboundToTest adapter.Outbound, testURL string) {
 	outboundTag := outboundToTest.Tag()
-	t, err := urltest.URLTest(ctx, "", outboundToTest)
+	t, err := urltest.URLTest(ctx, testURL, outboundToTest)
 	if err != nil {
 		historyStorage.DeleteURLTestHistory(outboundTag)
 	} else {
