@@ -837,6 +837,7 @@ func (x *GroupItem) GetUrlTestDelay() int32 {
 type URLTestRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OutboundTag   string                 `protobuf:"bytes,1,opt,name=outboundTag,proto3" json:"outboundTag,omitempty"`
+	ItemTag       string                 `protobuf:"bytes,2,opt,name=itemTag,proto3" json:"itemTag,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -874,6 +875,13 @@ func (*URLTestRequest) Descriptor() ([]byte, []int) {
 func (x *URLTestRequest) GetOutboundTag() string {
 	if x != nil {
 		return x.OutboundTag
+	}
+	return ""
+}
+
+func (x *URLTestRequest) GetItemTag() string {
+	if x != nil {
+		return x.ItemTag
 	}
 	return ""
 }
@@ -4726,9 +4734,10 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12 \n" +
 	"\vurlTestTime\x18\x03 \x01(\x03R\vurlTestTime\x12\"\n" +
-	"\furlTestDelay\x18\x04 \x01(\x05R\furlTestDelay\"2\n" +
+	"\furlTestDelay\x18\x04 \x01(\x05R\furlTestDelay\"L\n" +
 	"\x0eURLTestRequest\x12 \n" +
-	"\voutboundTag\x18\x01 \x01(\tR\voutboundTag\"U\n" +
+	"\voutboundTag\x18\x01 \x01(\tR\voutboundTag\x12\x18\n" +
+	"\aitemTag\x18\x02 \x01(\tR\aitemTag\"U\n" +
 	"\x15SelectOutboundRequest\x12\x1a\n" +
 	"\bgroupTag\x18\x01 \x01(\tR\bgroupTag\x12 \n" +
 	"\voutboundTag\x18\x02 \x01(\tR\voutboundTag\"O\n" +

@@ -562,6 +562,19 @@ func (c *CommandClient) URLTest(groupTag string) error {
 	return nil
 }
 
+func (c *CommandClient) URLTestItem(groupTag string, itemTag string) error {
+	_, err := callWithResult(c, func(ctx context.Context, client daemon.StartedServiceClient) (*emptypb.Empty, error) {
+		return client.URLTest(ctx, &daemon.URLTestRequest{
+			OutboundTag: groupTag,
+			ItemTag:     itemTag,
+		})
+	})
+	if err != nil {
+		return E.Cause(err, "url test item")
+	}
+	return nil
+}
+
 func (c *CommandClient) SetClashMode(newMode string) error {
 	_, err := callWithResult(c, func(ctx context.Context, client daemon.StartedServiceClient) (*emptypb.Empty, error) {
 		return client.SetClashMode(ctx, &daemon.ClashMode{

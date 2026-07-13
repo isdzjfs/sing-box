@@ -590,6 +590,14 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	if !isOutboundGroup {
 		return nil, status.Error(codes.InvalidArgument, "outbound is not a group: "+groupTag)
 	}
+	if request.ItemTag != "" {
+		outboundToTest, err := outboundInGroup(boxService, outboundGroup, groupTag, request.ItemTag)
+		if err != nil {
+			return nil, err
+		}
+		go runURLTest(boxService.ctx, boxService.urlTestHistoryStorage, outboundToTest)
+		return &emptypb.Empty{}, nil
+	}
 	urlTest, isURLTest := abstractOutboundGroup.(*group.URLTest)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
@@ -611,20 +619,42 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 			outboundToTest := detour
 			outboundTag := outboundToTest.Tag()
 			b.Go(outboundTag, func() (any, error) {
-				t, err := urltest.URLTest(boxService.ctx, "", outboundToTest)
-				if err != nil {
-					historyStorage.DeleteURLTestHistory(outboundTag)
-				} else {
-					historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
-						Time:  time.Now(),
-						Delay: t,
-					})
-				}
+				runURLTest(boxService.ctx, historyStorage, outboundToTest)
 				return nil, nil
 			})
 		}
 	}
 	return &emptypb.Empty{}, nil
+}
+
+func outboundInGroup(boxService *Instance, outboundGroup adapter.OutboundGroup, groupTag string, itemTag string) (adapter.Outbound, error) {
+	for _, candidateTag := range outboundGroup.All() {
+		if candidateTag != itemTag {
+			continue
+		}
+		outboundToTest, isLoaded := boxService.outboundManager.Outbound(candidateTag)
+		if !isLoaded {
+			return nil, status.Error(codes.NotFound, "outbound item not found: "+itemTag)
+		}
+		if _, isGroup := outboundToTest.(adapter.OutboundGroup); isGroup {
+			return nil, status.Error(codes.InvalidArgument, "outbound item is a group: "+itemTag)
+		}
+		return outboundToTest, nil
+	}
+	return nil, status.Error(codes.NotFound, "outbound item not found in group "+groupTag+": "+itemTag)
+}
+
+func runURLTest(ctx context.Context, historyStorage *urltest.HistoryStorage, outboundToTest adapter.Outbound) {
+	outboundTag := outboundToTest.Tag()
+	t, err := urltest.URLTest(ctx, "", outboundToTest)
+	if err != nil {
+		historyStorage.DeleteURLTestHistory(outboundTag)
+	} else {
+		historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
+			Time:  time.Now(),
+			Delay: t,
+		})
+	}
 }
 
 func (s *StartedService) SelectOutbound(ctx context.Context, request *SelectOutboundRequest) (*emptypb.Empty, error) {

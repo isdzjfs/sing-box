@@ -118,6 +118,7 @@ message GroupItem {
 
 message URLTestRequest {
   string outboundTag = 1;
+  string itemTag = 2;
 }
 
 message SelectOutboundRequest {
