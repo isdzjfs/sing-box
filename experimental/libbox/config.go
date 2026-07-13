@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/proxyprovider"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -46,14 +47,44 @@ func parseConfig(ctx context.Context, configContent string) (option.Options, err
 }
 
 func CheckConfig(configContent string) error {
+	_, err := resolveConfig(configContent)
+	return err
+}
+
+// ResolveConfig validates the config and returns the provider-expanded form for UI inspection.
+// The original config remains the source of truth so provider metadata is not persisted away.
+func ResolveConfig(configContent string) (*StringBox, error) {
+	options, err := resolveConfig(configContent)
+	if err != nil {
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetIndent("", "  ")
+	err = encoder.Encode(options)
+	if err != nil {
+		return nil, err
+	}
+	return wrapString(buffer.String()), nil
+}
+
+func resolveConfig(configContent string) (option.Options, error) {
 	ctx := baseContext(nil)
 	options, err := parseConfig(ctx, configContent)
 	if err != nil {
-		return err
+		return option.Options{}, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	ctx = service.ContextWith[adapter.PlatformInterface](ctx, (*platformInterfaceStub)(nil))
+	err = proxyprovider.Expand(ctx, log.NewNOPFactory().Logger(), &options)
+	if err != nil {
+		return option.Options{}, E.Cause(err, "expand proxy providers")
+	}
+	// box.New also expands providers. Clear only this resolved copy to avoid a second download
+	// and duplicate provider outbounds during validation.
+	options.ProxyProviders = nil
+	options.ProxyProviderDefaults = nil
 	instance, err := box.New(box.Options{
 		Context: ctx,
 		Options: options,
@@ -61,7 +92,10 @@ func CheckConfig(configContent string) error {
 	if err == nil {
 		instance.Close()
 	}
-	return err
+	if err != nil {
+		return option.Options{}, err
+	}
+	return options, nil
 }
 
 type platformInterfaceStub struct{}
