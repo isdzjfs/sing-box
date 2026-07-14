@@ -6,13 +6,29 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log"
 	"net"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/internal/winmutex"
+	E "github.com/sagernet/sing/common/exceptions"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
 )
+
+func TestMain(m *testing.M) {
+	exitCode, err := winmutex.WithLock("SingBoxWinDivertIntegrationTests", 3*time.Minute, func() (int, error) {
+		return m.Run(), nil
+	})
+	if err != nil {
+		log.Print(E.Cause(err, "run in exclusive WinDivert integration test environment"))
+		os.Exit(1)
+	}
+	os.Exit(exitCode)
+}
 
 func newSpoofer(t *testing.T, conn net.Conn, method Method) rawSpoofer {
 	t.Helper()
