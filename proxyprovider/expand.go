@@ -168,6 +168,9 @@ func mergeProxyProviderOverride(defaults option.ProxyProviderOverride, override 
 	if override.Insecure == nil {
 		override.Insecure = defaults.Insecure
 	}
+	if override.ClientName == "" {
+		override.ClientName = defaults.ClientName
+	}
 	if override.AdditionalPrefix == "" {
 		override.AdditionalPrefix = defaults.AdditionalPrefix
 	}

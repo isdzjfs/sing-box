@@ -705,6 +705,10 @@ func convertAnyTLS(provider option.ProxyProvider, proxy map[string]any, domainRe
 	options := &option.AnyTLSOutboundOptions{
 		ServerOptions: serverOptions(proxy),
 		Password:      stringValue(proxy, "password"),
+		ClientName:    stringValue(proxy, "client_name", "client-name"),
+	}
+	if options.ClientName == "" && provider.Override.ClientName != "" {
+		options.ClientName = provider.Override.ClientName
 	}
 	options.TLS = tlsOptions(proxy, provider.Override, true)
 	if options.Password == "" {

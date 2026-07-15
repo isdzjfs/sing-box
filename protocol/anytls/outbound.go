@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -19,27 +20,32 @@ import (
 	"github.com/sagernet/sing/common/uot"
 
 	anytls "github.com/anytls/sing-anytls"
+	anytlsutil "github.com/anytls/sing-anytls/util"
 )
 
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.AnyTLSOutboundOptions](registry, C.TypeAnyTLS, NewOutbound)
 }
 
+var clientVersionAccess sync.Mutex
+
 type Outbound struct {
 	outbound.Adapter
-	dialer    tls.Dialer
-	server    M.Socksaddr
-	tlsConfig tls.Config
-	client    *anytls.Client
-	uotClient *uot.Client
-	logger    log.ContextLogger
+	dialer     tls.Dialer
+	server     M.Socksaddr
+	tlsConfig  tls.Config
+	client     *anytls.Client
+	clientName string
+	uotClient  *uot.Client
+	logger     log.ContextLogger
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AnyTLSOutboundOptions) (adapter.Outbound, error) {
 	outbound := &Outbound{
-		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeAnyTLS, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
-		server:  options.ServerOptions.Build(),
-		logger:  logger,
+		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeAnyTLS, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+		server:     options.ServerOptions.Build(),
+		clientName: options.ClientName,
+		logger:     logger,
 	}
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
@@ -83,7 +89,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	outbound.client = client
 
 	outbound.uotClient = &uot.Client{
-		Dialer:  (anytlsDialer)(client.CreateProxy),
+		Dialer:  (anytlsDialer)(outbound.createProxy),
 		Version: uot.Version,
 	}
 	return outbound, nil
@@ -99,6 +105,22 @@ func (d anytlsDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	return nil, os.ErrInvalid
 }
 
+func (h *Outbound) createProxy(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	// sing-anytls v0.0.11 reads util.Verison from a package global in Session.Run.
+	// Serialize session creation so one outbound's client_name cannot leak into another.
+	clientVersionAccess.Lock()
+	defer clientVersionAccess.Unlock()
+	if h.clientName == "" {
+		return h.client.CreateProxy(ctx, destination)
+	}
+	previousVersion := anytlsutil.Verison
+	anytlsutil.Verison = h.clientName
+	defer func() {
+		anytlsutil.Verison = previousVersion
+	}()
+	return h.client.CreateProxy(ctx, destination)
+}
+
 func (h *Outbound) dialOut(ctx context.Context) (net.Conn, error) {
 	return h.dialer.DialTLSContext(ctx, h.server)
 }
@@ -110,7 +132,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		return h.client.CreateProxy(ctx, destination)
+		return h.createProxy(ctx, destination)
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound UoT packet connection to ", destination)
 		return h.uotClient.DialContext(ctx, network, destination)

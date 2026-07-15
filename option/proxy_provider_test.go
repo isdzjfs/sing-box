@@ -11,12 +11,13 @@ func TestOptionsUnmarshalProxyProviders(t *testing.T) {
 		"proxy-provider-defaults": {
 			"type": "http",
 			"interval": 43200,
-			"exclude-filter": "流量|到期",
+			"exclude-filter": "traffic|expire",
 			"exclude-type": "Hysteria|Hysteria2",
 			"override": {
 				"udp": true,
 				"ip-version": "ipv4",
-				"insecure": false
+				"insecure": false,
+				"client_name": "DefaultClient"
 			}
 		},
 		"proxy-providers": {
@@ -24,7 +25,8 @@ func TestOptionsUnmarshalProxyProviders(t *testing.T) {
 				"url": "https://example.com/sub.yaml",
 				"proxy": "",
 				"override": {
-					"additional-prefix": "良心云 | "
+					"client_name": "ProviderClient",
+					"additional-prefix": "Provider A | "
 				}
 			}
 		}
@@ -35,17 +37,23 @@ func TestOptionsUnmarshalProxyProviders(t *testing.T) {
 	if options.ProxyProviderDefaults == nil {
 		t.Fatal("missing proxy provider defaults")
 	}
-	if options.ProxyProviderDefaults.Interval != 43200 || options.ProxyProviderDefaults.ExcludeFilter != "流量|到期" {
+	if options.ProxyProviderDefaults.Interval != 43200 || options.ProxyProviderDefaults.ExcludeFilter != "traffic|expire" {
 		t.Fatalf("unexpected provider defaults: %#v", options.ProxyProviderDefaults)
 	}
 	if options.ProxyProviderDefaults.Override.Insecure == nil || *options.ProxyProviderDefaults.Override.Insecure {
 		t.Fatalf("unexpected default override insecure: %#v", options.ProxyProviderDefaults.Override.Insecure)
 	}
+	if options.ProxyProviderDefaults.Override.ClientName != "DefaultClient" {
+		t.Fatalf("unexpected default override client name: %#v", options.ProxyProviderDefaults.Override)
+	}
 	provider := options.ProxyProviders["sub"]
 	if provider.URL != "https://example.com/sub.yaml" {
 		t.Fatalf("unexpected provider: %#v", provider)
 	}
-	if provider.Override.AdditionalPrefix != "良心云 | " {
+	if provider.Override.ClientName != "ProviderClient" {
+		t.Fatalf("unexpected provider client name override: %#v", provider.Override)
+	}
+	if provider.Override.AdditionalPrefix != "Provider A | " {
 		t.Fatalf("unexpected override: %#v", provider.Override)
 	}
 }

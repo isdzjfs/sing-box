@@ -18,7 +18,7 @@ import (
 func TestExpandFileProviderSelectorUseAndOverrides(t *testing.T) {
 	subscriptionPath := writeSubscription(t, `
 proxies:
-  - name: 流量 1GB
+  - name: traffic 1GB
     type: ss
     server: example.com
     port: 8388
@@ -45,7 +45,7 @@ proxies:
 	urlTestOptions := &option.URLTestOutboundOptions{Use: []string{"sub"}}
 	options := option.Options{
 		ProxyProviderDefaults: &option.ProxyProvider{
-			ExcludeFilter: "流量|到期",
+			ExcludeFilter: "traffic|expire",
 			Override: option.ProxyProviderOverride{
 				UDP:       &enableUDP,
 				IPVersion: "ipv4",
@@ -57,7 +57,7 @@ proxies:
 				Type: "file",
 				Path: subscriptionPath,
 				Override: option.ProxyProviderOverride{
-					AdditionalPrefix: "良心云 | ",
+					AdditionalPrefix: "Provider A | ",
 				},
 			},
 		},
@@ -73,17 +73,17 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := selectorOptions.Outbounds, []string{"良心云 | HK VLESS"}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := selectorOptions.Outbounds, []string{"Provider A | HK VLESS"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
 	}
-	if got, want := urlTestOptions.Outbounds, []string{"良心云 | HK VLESS"}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := urlTestOptions.Outbounds, []string{"Provider A | HK VLESS"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("urltest outbounds = %#v, want %#v", got, want)
 	}
 	if len(options.Outbounds) != 3 {
 		t.Fatalf("outbound count = %d, want 3", len(options.Outbounds))
 	}
 	generated := options.Outbounds[2]
-	if generated.Type != C.TypeVLESS || generated.Tag != "良心云 | HK VLESS" {
+	if generated.Type != C.TypeVLESS || generated.Tag != "Provider A | HK VLESS" {
 		t.Fatalf("generated outbound = %s/%s", generated.Type, generated.Tag)
 	}
 	vlessOptions := generated.Options.(*option.VLESSOutboundOptions)
@@ -175,6 +175,140 @@ func TestMergeProxyProviderOverrideKeepsExplicitInsecureFalse(t *testing.T) {
 	})
 	if merged.Insecure == nil || *merged.Insecure {
 		t.Fatalf("merged insecure = %#v, want explicit false", merged.Insecure)
+	}
+}
+
+func TestMergeProxyProviderOverrideKeepsClientNameOverride(t *testing.T) {
+	merged := mergeProxyProviderOverride(option.ProxyProviderOverride{
+		ClientName: "DefaultClient",
+	}, option.ProxyProviderOverride{
+		ClientName: "ProviderClient",
+	})
+	if merged.ClientName != "ProviderClient" {
+		t.Fatalf("merged client name = %q, want ProviderClient", merged.ClientName)
+	}
+}
+
+func TestExpandAnyTLSClientNameNodeOnly(t *testing.T) {
+	subscriptionPath := writeSubscription(t, `
+proxies:
+  - name: Manual AnyTLS
+    type: anytls
+    server: manual.example.com
+    port: 443
+    password: manual-pass
+    udp: true
+    tfo: false
+    sni: manual.example.com
+    client-fingerprint: safari
+    client_name: CustomClient
+  - name: Provider AnyTLS
+    type: anytls
+    server: provider.example.com
+    port: 443
+    password: provider-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
+	options := option.Options{
+		ProxyProviders: map[string]option.ProxyProvider{
+			"sub": {
+				Type: "file",
+				Path: subscriptionPath,
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := selectorOptions.Outbounds, []string{"Manual AnyTLS", "Provider AnyTLS"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
+	}
+	manualOptions := options.Outbounds[1].Options.(*option.AnyTLSOutboundOptions)
+	if manualOptions.ClientName != "CustomClient" {
+		t.Fatalf("manual node client name = %q, want CustomClient", manualOptions.ClientName)
+	}
+	providerOptions := options.Outbounds[2].Options.(*option.AnyTLSOutboundOptions)
+	if providerOptions.ClientName != "" {
+		t.Fatalf("provider node client name = %q, want empty", providerOptions.ClientName)
+	}
+}
+
+func TestExpandAnyTLSClientNameOverrides(t *testing.T) {
+	defaultedPath := writeSubscription(t, `
+proxies:
+  - name: Node Override
+    type: anytls
+    server: node-override.example.com
+    port: 443
+    password: node-override-pass
+    client_name: NodeClient
+  - name: Defaulted
+    type: anytls
+    server: defaulted.example.com
+    port: 443
+    password: defaulted-pass
+`)
+	providerPath := writeSubscription(t, `
+proxies:
+  - name: Provider Node Override
+    type: anytls
+    server: provider-node.example.com
+    port: 443
+    password: provider-node-pass
+    client_name: ProviderNodeClient
+  - name: Provider
+    type: anytls
+    server: provider.example.com
+    port: 443
+    password: provider-pass
+`)
+	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"defaulted", "provider"}}
+	options := option.Options{
+		ProxyProviderDefaults: &option.ProxyProvider{
+			Override: option.ProxyProviderOverride{
+				ClientName: "DefaultClient",
+			},
+		},
+		ProxyProviders: map[string]option.ProxyProvider{
+			"defaulted": {
+				Type: "file",
+				Path: defaultedPath,
+			},
+			"provider": {
+				Type: "file",
+				Path: providerPath,
+				Override: option.ProxyProviderOverride{
+					ClientName: "ProviderClient",
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{Type: C.TypeSelector, Tag: "proxy", Options: selectorOptions},
+		},
+	}
+
+	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
+		t.Fatal(err)
+	}
+	nodeOptions := options.Outbounds[1].Options.(*option.AnyTLSOutboundOptions)
+	if nodeOptions.ClientName != "NodeClient" {
+		t.Fatalf("node client name = %q, want NodeClient", nodeOptions.ClientName)
+	}
+	defaultedOptions := options.Outbounds[2].Options.(*option.AnyTLSOutboundOptions)
+	if defaultedOptions.ClientName != "DefaultClient" {
+		t.Fatalf("defaulted client name = %q, want DefaultClient", defaultedOptions.ClientName)
+	}
+	providerNodeOptions := options.Outbounds[3].Options.(*option.AnyTLSOutboundOptions)
+	if providerNodeOptions.ClientName != "ProviderNodeClient" {
+		t.Fatalf("provider node client name = %q, want ProviderNodeClient", providerNodeOptions.ClientName)
+	}
+	providerOptions := options.Outbounds[4].Options.(*option.AnyTLSOutboundOptions)
+	if providerOptions.ClientName != "ProviderClient" {
+		t.Fatalf("provider client name = %q, want ProviderClient", providerOptions.ClientName)
 	}
 }
 
@@ -1176,22 +1310,22 @@ proxies:
 }
 
 func TestExpandOutboundGroupExcludeFilterMatchesProviderTag(t *testing.T) {
-	yepFastPath := writeSubscription(t, `
+	providerAPath := writeSubscription(t, `
 proxies:
-  - name: 香港 01
+  - name: Region A 01
     type: anytls
-    server: yep.example.com
+    server: provider-a.example.com
     port: 443
-    password: yep-pass
-  - name: 日本 01
+    password: provider-a-pass
+  - name: Region B 01
     type: anytls
-    server: yep-jp.example.com
+    server: provider-a-b.example.com
     port: 443
-    password: yep-jp-pass
+    password: provider-a-b-pass
 `)
 	otherPath := writeSubscription(t, `
 proxies:
-  - name: 香港 01
+  - name: Region A 01
     type: vless
     server: hk.example.com
     port: 443
@@ -1199,23 +1333,23 @@ proxies:
     tls: true
 `)
 	urlTestOptions := &option.URLTestOutboundOptions{
-		Filter:        "香港",
-		ExcludeFilter: "YepFast",
+		Filter:        "Region A",
+		ExcludeFilter: "Provider A",
 	}
 	options := option.Options{
 		ProxyProviders: map[string]option.ProxyProvider{
-			"YepFast": {
+			"Provider A": {
 				Type: "file",
-				Path: yepFastPath,
+				Path: providerAPath,
 				Override: option.ProxyProviderOverride{
-					AdditionalPrefix: "YepFast | ",
+					AdditionalPrefix: "Provider A | ",
 				},
 			},
-			"云开见月": {
+			"Provider B": {
 				Type: "file",
 				Path: otherPath,
 				Override: option.ProxyProviderOverride{
-					AdditionalPrefix: "云开见月 | ",
+					AdditionalPrefix: "Provider B | ",
 				},
 			},
 		},
@@ -1227,7 +1361,7 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := urlTestOptions.Outbounds, []string{"云开见月 | 香港 01"}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := urlTestOptions.Outbounds, []string{"Provider B | Region A 01"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("urltest outbounds = %#v, want %#v", got, want)
 	}
 }
