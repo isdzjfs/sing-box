@@ -155,12 +155,13 @@ func convertSOCKS(provider option.ProxyProvider, proxy map[string]any, domainRes
 }
 
 func convertShadowsocks(provider option.ProxyProvider, proxy map[string]any, domainResolver string) (*option.ShadowsocksOutboundOptions, error) {
+	plugin := shadowsocksPluginName(stringValue(proxy, "plugin"))
 	options := &option.ShadowsocksOutboundOptions{
 		ServerOptions: serverOptions(proxy),
 		Method:        stringValue(proxy, "cipher", "method"),
 		Password:      stringValue(proxy, "password"),
 		Network:       networkList(provider, proxy),
-		Plugin:        stringValue(proxy, "plugin"),
+		Plugin:        plugin,
 	}
 	if options.Method == "" {
 		return nil, E.New("missing cipher")
@@ -168,7 +169,7 @@ func convertShadowsocks(provider option.ProxyProvider, proxy map[string]any, dom
 	if options.Password == "" {
 		return nil, E.New("missing password")
 	}
-	if pluginOptions := pluginOptions(proxy); pluginOptions != "" {
+	if pluginOptions := pluginOptions(proxy, options.Plugin); pluginOptions != "" {
 		options.PluginOptions = pluginOptions
 	}
 	return options, applyDialerOverride(&options.DialerOptions, provider.Override, domainResolver)
@@ -917,14 +918,78 @@ func v2rayXHTTPOptions(proxy map[string]any, network string) (option.V2RayXHTTPO
 	return options, nil
 }
 
-func pluginOptions(proxy map[string]any) string {
+func shadowsocksPluginName(plugin string) string {
+	if strings.EqualFold(plugin, "obfs") {
+		return "obfs-local"
+	}
+	return plugin
+}
+
+func pluginOptions(proxy map[string]any, plugin string) string {
 	if value := stringValue(proxy, "plugin-opts", "plugin_opts"); value != "" {
+		if strings.EqualFold(plugin, "obfs-local") {
+			return obfsLocalPluginOptionsString(value)
+		}
 		return value
 	}
 	pluginOptions := mapValue(proxy, "plugin-opts", "plugin_opts")
 	if len(pluginOptions) == 0 {
 		return ""
 	}
+	if strings.EqualFold(plugin, "obfs-local") {
+		pluginOptions = obfsLocalPluginOptionsMap(pluginOptions)
+	}
+	return formatPluginOptions(pluginOptions)
+}
+
+func obfsLocalPluginOptionsString(value string) string {
+	if strings.Contains(value, "\\") {
+		return value
+	}
+	rawOptions := make(map[string]any)
+	for _, part := range strings.Split(value, ";") {
+		if part == "" {
+			continue
+		}
+		key, optionValue, hasValue := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return value
+		}
+		if !hasValue {
+			rawOptions[key] = "1"
+		} else {
+			rawOptions[key] = strings.TrimSpace(optionValue)
+		}
+	}
+	if len(rawOptions) == 0 {
+		return value
+	}
+	return formatPluginOptions(obfsLocalPluginOptionsMap(rawOptions))
+}
+
+func obfsLocalPluginOptionsMap(pluginOptions map[string]any) map[string]any {
+	converted := make(map[string]any, len(pluginOptions))
+	for key, value := range pluginOptions {
+		converted[key] = value
+	}
+	if stringValue(converted, "obfs") == "" {
+		if mode := stringValue(converted, "mode"); mode != "" {
+			converted["obfs"] = mode
+		}
+	}
+	if stringValue(converted, "obfs-host") == "" {
+		if host := stringValue(converted, "host", "obfs_host"); host != "" {
+			converted["obfs-host"] = host
+		}
+	}
+	delete(converted, "mode")
+	delete(converted, "host")
+	delete(converted, "obfs_host")
+	return converted
+}
+
+func formatPluginOptions(pluginOptions map[string]any) string {
 	keys := make([]string, 0, len(pluginOptions))
 	for key := range pluginOptions {
 		keys = append(keys, key)

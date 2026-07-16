@@ -346,6 +346,10 @@ proxies:
     port: 8388
     cipher: aes-128-gcm
     password: ss-pass
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: ss.example.com
   - name: SSR
     type: ssr
     server: ssr.example.com
@@ -403,12 +407,25 @@ proxies:
 	if len(hy2Options.ServerPorts) != 1 || hy2Options.ServerPorts[0] != "60000:65530" {
 		t.Fatalf("server ports = %#v, want 60000:65530", hy2Options.ServerPorts)
 	}
+	ssOptions := options.Outbounds[5].Options.(*option.ShadowsocksOutboundOptions)
+	if ssOptions.Plugin != "obfs-local" || ssOptions.PluginOptions != "obfs=http;obfs-host=ss.example.com" {
+		t.Fatalf("unexpected ss plugin options: %#v", ssOptions)
+	}
 	ssrOptions := options.Outbounds[6].Options.(*option.ShadowsocksROutboundOptions)
 	if ssrOptions.Method != "aes-256-cfb" || ssrOptions.Obfs != "tls1.2_ticket_auth" || ssrOptions.Protocol != "auth_chain_a" {
 		t.Fatalf("unexpected ssr options: %#v", ssrOptions)
 	}
 	if ssrOptions.ObfsParam != "cdn.example.com" || ssrOptions.ProtocolParam != "123:ssr-proto-pass" {
 		t.Fatalf("unexpected ssr params: %#v", ssrOptions)
+	}
+}
+
+func TestPluginOptionsConvertsObfsStringAliases(t *testing.T) {
+	got := pluginOptions(map[string]any{
+		"plugin-opts": "mode=http;host=ss.example.com",
+	}, "obfs-local")
+	if got != "obfs=http;obfs-host=ss.example.com" {
+		t.Fatalf("plugin options = %q", got)
 	}
 }
 
