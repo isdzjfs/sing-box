@@ -101,17 +101,21 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		options.MTU = 1408
 	}
 	deviceOptions := DeviceOptions{
-		Context:        options.Context,
-		Logger:         options.Logger,
-		System:         options.System,
-		Handler:        options.Handler,
-		UDPTimeout:     options.UDPTimeout,
-		ICMPTimeout:    options.ICMPTimeout,
-		CreateDialer:   options.CreateDialer,
-		Name:           options.Name,
-		MTU:            options.MTU,
-		Address:        options.Address,
-		AllowedAddress: allowedAddresses,
+		Context:         options.Context,
+		Logger:          options.Logger,
+		System:          options.System,
+		Handler:         options.Handler,
+		UDPTimeout:      options.UDPTimeout,
+		ICMPTimeout:     options.ICMPTimeout,
+		UDPMapping:      options.UDPMapping,
+		UDPFiltering:    options.UDPFiltering,
+		UDPNATMax:       options.UDPNATMax,
+		InterfaceFinder: options.InterfaceFinder,
+		CreateDialer:    options.CreateDialer,
+		Name:            options.Name,
+		MTU:             options.MTU,
+		Address:         options.Address,
+		AllowedAddress:  allowedAddresses,
 	}
 	tunDevice, err := NewDevice(deviceOptions)
 	if err != nil {
@@ -148,13 +152,17 @@ func (e *Endpoint) Start(resolve bool) error {
 		return nil
 	}
 	var bind conn.Bind
-	wgListener, isWgListener := common.Cast[dialer.WireGuardListener](e.options.Dialer)
-	if isWgListener {
-		stdBind := conn.NewStdNetBind(wgListener.WireGuardControl())
+	udpListener, isUDPListener := common.Cast[dialer.UDPListener](e.options.Dialer)
+	if isUDPListener {
+		listenerControl, _ := udpListener.UDPListenerControl()
+		standardBind := conn.NewStdNetBind(listenerControl).(*conn.StdNetBind)
 		if e.options.ListenPort == 0 && len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
-			stdBind.(*conn.StdNetBind).SetSinglePeerMode()
+			standardBind.SetSinglePeerMode()
 		}
-		bind = stdBind
+		if e.options.EgressPool != nil {
+			standardBind.SetEgressProvider(e.options.EgressPool)
+		}
+		bind = standardBind
 	} else {
 		var (
 			isConnect   bool
@@ -168,7 +176,7 @@ func (e *Endpoint) Start(resolve bool) error {
 		}
 		bind = NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
 	}
-	if isWgListener || len(e.peers) > 1 {
+	if isUDPListener || len(e.peers) > 1 {
 		for _, peer := range e.peers {
 			if peer.reserved != [3]uint8{} {
 				bind.SetReservedForEndpoint(peer.endpoint, peer.reserved)
@@ -227,12 +235,16 @@ func (e *Endpoint) Close() error {
 		e.pause.UnregisterCallback(e.pauseCallback)
 		e.pauseCallback = nil
 	}
+	if e.options.EgressPool != nil {
+		e.options.EgressPool.Close()
+	}
 	if e.device != nil {
 		e.device.Down()
 		e.device.Close()
 		e.device = nil
+		return nil
 	}
-	return nil
+	return e.tunDevice.Close()
 }
 
 func (e *Endpoint) Lookup(address netip.Addr) *device.Peer {
