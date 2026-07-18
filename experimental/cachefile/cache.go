@@ -45,6 +45,7 @@ type CacheFile struct {
 	logger             logger.Logger
 	path               string
 	cacheID            []byte
+	storeSelected      bool
 	storeFakeIP        bool
 	storeRDRC          bool
 	storeDNS           bool
@@ -88,6 +89,10 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
 	if options.CacheID != "" {
 		cacheIDBytes = append([]byte{0}, []byte(options.CacheID)...)
 	}
+	storeSelected := true
+	if options.StoreSelected != nil {
+		storeSelected = *options.StoreSelected
+	}
 	if options.StoreRDRC {
 		deprecated.Report(ctx, deprecated.OptionStoreRDRC)
 	}
@@ -100,19 +105,20 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
 		}
 	}
 	return &CacheFile{
-		ctx:          ctx,
-		logger:       logger,
-		path:         filemanager.BasePath(ctx, path),
-		cacheID:      cacheIDBytes,
-		storeFakeIP:  options.StoreFakeIP,
-		storeRDRC:    options.StoreRDRC,
-		storeDNS:     options.StoreDNS,
-		rdrcTimeout:  rdrcTimeout,
-		saveDomain:   make(map[netip.Addr]string),
-		saveAddress4: make(map[string]netip.Addr),
-		saveAddress6: make(map[string]netip.Addr),
-		saveRDRC:     make(map[saveCacheKey]bool),
-		saveDNSCache: make(map[saveCacheKey]saveDNSCacheEntry),
+		ctx:           ctx,
+		logger:        logger,
+		path:          filemanager.BasePath(ctx, path),
+		cacheID:       cacheIDBytes,
+		storeSelected: storeSelected,
+		storeFakeIP:   options.StoreFakeIP,
+		storeRDRC:     options.StoreRDRC,
+		storeDNS:      options.StoreDNS,
+		rdrcTimeout:   rdrcTimeout,
+		saveDomain:    make(map[netip.Addr]string),
+		saveAddress4:  make(map[string]netip.Addr),
+		saveAddress6:  make(map[string]netip.Addr),
+		saveRDRC:      make(map[saveCacheKey]bool),
+		saveDNSCache:  make(map[saveCacheKey]saveDNSCacheEntry),
 	}
 }
 
@@ -330,6 +336,9 @@ func (c *CacheFile) createBucket(t *bbolt.Tx, key []byte) (*bbolt.Bucket, error)
 }
 
 func (c *CacheFile) LoadSelected(group string) string {
+	if !c.storeSelected {
+		return ""
+	}
 	var selected string
 	c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketSelected)
@@ -346,6 +355,9 @@ func (c *CacheFile) LoadSelected(group string) string {
 }
 
 func (c *CacheFile) StoreSelected(group, selected string) error {
+	if !c.storeSelected {
+		return nil
+	}
 	return c.batch(func(t *bbolt.Tx) error {
 		bucket, err := c.createBucket(t, bucketSelected)
 		if err != nil {

@@ -17,6 +17,7 @@
   "enabled": true,
   "path": "",
   "cache_id": "",
+  "store_selected": true,
   "store_fakeip": false,
   "store_rdrc": false,
   "rdrc_timeout": "",
@@ -39,6 +40,12 @@
 缓存文件中的标识符。
 
 如果不为空，配置特定的数据将使用由其键控的单独存储。
+
+#### store_selected
+
+将 selector 策略组的选中出站存储在缓存文件中。
+
+默认启用。
 
 #### store_fakeip
 

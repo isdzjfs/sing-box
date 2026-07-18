@@ -17,6 +17,7 @@
   "enabled": true,
   "path": "",
   "cache_id": "",
+  "store_selected": true,
   "store_fakeip": false,
   "store_rdrc": false,
   "rdrc_timeout": "",
@@ -41,6 +42,12 @@ Path to the cache file.
 Identifier in the cache file
 
 If not empty, configuration specified data will use a separate store keyed by it.
+
+#### store_selected
+
+Store the selected outbound of selector groups in the cache file.
+
+Enabled by default.
 
 #### store_fakeip
 
