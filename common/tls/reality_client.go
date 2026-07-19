@@ -226,7 +226,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	err = uConn.HandshakeContext(ctx)
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "reality handshake")
 	}
 
 	if debug.Enabled {

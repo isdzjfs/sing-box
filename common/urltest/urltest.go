@@ -12,6 +12,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
@@ -232,7 +233,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	}
 	linkURL, err := url.Parse(link)
 	if err != nil {
-		return
+		return 0, E.Cause(err, "parse URL test target")
 	}
 	hostname := linkURL.Hostname()
 	port := linkURL.Port()
@@ -248,7 +249,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	start := time.Now()
 	instance, err := detour.DialContext(ctx, "tcp", M.ParseSocksaddrHostPortStr(hostname, port))
 	if err != nil {
-		return
+		return 0, E.Cause(err, "dial URL test target ", hostname, ":", port)
 	}
 	defer instance.Close()
 	if N.NeedHandshakeForWrite(instance) {
@@ -256,7 +257,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	}
 	req, err := http.NewRequest(http.MethodHead, link, nil)
 	if err != nil {
-		return
+		return 0, E.Cause(err, "create URL test request")
 	}
 	client := http.Client{
 		Transport: &http.Transport{
@@ -276,7 +277,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
-		return
+		return 0, E.Cause(err, "perform URL test request to ", hostname, ":", port)
 	}
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)

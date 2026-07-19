@@ -2,12 +2,46 @@ package urltest
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	M "github.com/sagernet/sing/common/metadata"
 	"github.com/stretchr/testify/require"
 )
+
+type testErrorDialer struct {
+	dial func() (net.Conn, error)
+}
+
+func (d testErrorDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return d.dial()
+}
+
+func (testErrorDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func TestURLTestReportsDialStage(t *testing.T) {
+	sentinel := errors.New("sentinel")
+	_, err := URLTest(context.Background(), "https://example.com/generate_204", testErrorDialer{
+		dial: func() (net.Conn, error) { return nil, sentinel },
+	})
+	require.ErrorIs(t, err, sentinel)
+	require.EqualError(t, err, "dial URL test target example.com:443: sentinel")
+}
+
+func TestURLTestReportsRequestStage(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	serverConn.Close()
+	_, err := URLTest(context.Background(), "https://example.com/generate_204", testErrorDialer{
+		dial: func() (net.Conn, error) { return clientConn, nil },
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "perform URL test request to example.com:443")
+}
 
 func TestHistoryStorageKeepsRecentEntries(t *testing.T) {
 	storage := NewHistoryStorage()

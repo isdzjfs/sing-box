@@ -156,12 +156,17 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "dial VLESS server ", h.serverAddr)
 	}
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		return h.client.DialEarlyConn(conn, destination)
+		vlessConn, err := h.client.DialEarlyConn(conn, destination)
+		if err != nil {
+			conn.Close()
+			return nil, E.Cause(err, "initialize VLESS connection")
+		}
+		return vlessConn, nil
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		if h.xudp {
