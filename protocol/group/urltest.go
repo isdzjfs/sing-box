@@ -28,7 +28,10 @@ func RegisterURLTest(registry *outbound.Registry) {
 	outbound.Register[option.URLTestOutboundOptions](registry, C.TypeURLTest, NewURLTest)
 }
 
-var _ adapter.OutboundGroup = (*URLTest)(nil)
+var (
+	_ adapter.OutboundGroup     = (*URLTest)(nil)
+	_ adapter.OutboundGroupIcon = (*URLTest)(nil)
+)
 
 const maxURLTestDialAttempts = 2
 
@@ -60,6 +63,7 @@ type URLTest struct {
 	connection                   adapter.ConnectionManager
 	logger                       log.ContextLogger
 	tags                         []string
+	icon                         string
 	link                         string
 	interval                     time.Duration
 	tolerance                    uint16
@@ -76,6 +80,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		icon:                         options.Icon,
 		link:                         options.URL,
 		interval:                     time.Duration(options.Interval),
 		tolerance:                    options.Tolerance,
@@ -125,6 +130,10 @@ func (s *URLTest) Now() string {
 
 func (s *URLTest) All() []string {
 	return s.tags
+}
+
+func (s *URLTest) Icon() string {
+	return s.icon
 }
 
 func (s *URLTest) TestURL() string {

@@ -8,6 +8,7 @@ type SelectorOutboundOptions struct {
 	Filter                    string   `json:"filter,omitempty"`
 	ExcludeFilter             string   `json:"exclude-filter,omitempty"`
 	ExcludeType               string   `json:"exclude-type,omitempty"`
+	Icon                      string   `json:"icon,omitempty"`
 	Default                   string   `json:"default,omitempty"`
 	InterruptExistConnections bool     `json:"interrupt_exist_connections,omitempty"`
 }
@@ -18,6 +19,7 @@ type URLTestOutboundOptions struct {
 	Filter                    string             `json:"filter,omitempty"`
 	ExcludeFilter             string             `json:"exclude-filter,omitempty"`
 	ExcludeType               string             `json:"exclude-type,omitempty"`
+	Icon                      string             `json:"icon,omitempty"`
 	URL                       string             `json:"url,omitempty"`
 	Interval                  badoption.Duration `json:"interval,omitempty"`
 	Tolerance                 uint16             `json:"tolerance,omitempty"`

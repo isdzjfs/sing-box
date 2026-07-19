@@ -10,6 +10,7 @@
     "proxy-b",
     "proxy-c"
   ],
+  "icon": "https://example.com/icon.png",
   "default": "proxy-c",
   "interrupt_exist_connections": false
 }
@@ -26,6 +27,10 @@
 ==必填==
 
 用于选择的出站标签列表。
+
+#### icon
+
+通过 Clash API 向面板公开的策略组图标 URL。图标由面板下载，sing-box 不会下载，因此图片不可用不会影响启动。
 
 #### default
 

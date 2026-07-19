@@ -10,6 +10,7 @@
     "proxy-b",
     "proxy-c"
   ],
+  "icon": "https://example.com/icon.png",
   "url": "",
   "interval": "",
   "tolerance": 0,
@@ -25,6 +26,10 @@
 ==Required==
 
 List of outbound tags to test.
+
+#### icon
+
+Icon URL exposed for this group through the Clash API. The icon is downloaded by the dashboard, not by sing-box, so an unavailable image does not affect startup.
 
 #### url
 

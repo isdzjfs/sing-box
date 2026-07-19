@@ -10,6 +10,7 @@
     "proxy-b",
     "proxy-c"
   ],
+  "icon": "https://example.com/icon.png",
   "default": "proxy-c",
   "interrupt_exist_connections": false
 }
@@ -26,6 +27,10 @@
 ==Required==
 
 List of outbound tags to select.
+
+#### icon
+
+Icon URL exposed for this group through the Clash API. The icon is downloaded by the dashboard, not by sing-box, so an unavailable image does not affect startup.
 
 #### default
 

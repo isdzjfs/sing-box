@@ -130,6 +130,10 @@ type OutboundGroup interface {
 	All() []string
 }
 
+type OutboundGroupIcon interface {
+	Icon() string
+}
+
 type InterruptibleOutboundGroup interface {
 	InterruptsExternalConnections() bool
 }

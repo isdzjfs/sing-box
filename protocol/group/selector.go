@@ -25,6 +25,7 @@ func RegisterSelector(registry *outbound.Registry) {
 
 var (
 	_ adapter.OutboundGroup           = (*Selector)(nil)
+	_ adapter.OutboundGroupIcon       = (*Selector)(nil)
 	_ adapter.ConnectionHandler       = (*Selector)(nil)
 	_ adapter.PacketConnectionHandler = (*Selector)(nil)
 )
@@ -36,6 +37,7 @@ type Selector struct {
 	connection                   adapter.ConnectionManager
 	logger                       logger.ContextLogger
 	tags                         []string
+	icon                         string
 	defaultTag                   string
 	outbounds                    map[string]adapter.Outbound
 	selected                     common.TypedValue[adapter.Outbound]
@@ -52,6 +54,7 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		icon:                         options.Icon,
 		defaultTag:                   options.Default,
 		outbounds:                    make(map[string]adapter.Outbound),
 		history:                      service.PtrFromContext[urltest.HistoryStorage](ctx),
@@ -123,6 +126,10 @@ func (s *Selector) Now() string {
 
 func (s *Selector) All() []string {
 	return s.tags
+}
+
+func (s *Selector) Icon() string {
+	return s.icon
 }
 
 func (s *Selector) InterruptsExternalConnections() bool {

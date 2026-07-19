@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -18,6 +19,15 @@ import (
 	"github.com/sagernet/sing/service/pause"
 	"github.com/stretchr/testify/require"
 )
+
+func TestURLTestPreservesIcon(t *testing.T) {
+	outbound, err := NewURLTest(context.Background(), nil, nil, "auto", option.URLTestOutboundOptions{
+		Outbounds: []string{"proxy-a"},
+		Icon:      "https://127.0.0.1:1/unavailable.png",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://127.0.0.1:1/unavailable.png", outbound.(adapter.OutboundGroupIcon).Icon())
+}
 
 func TestURLTestGroupPostStartStartsTicker(t *testing.T) {
 	group := newTestURLTestGroup(t, 10*time.Millisecond, 100*time.Millisecond)
