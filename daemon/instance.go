@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"sync"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
@@ -29,6 +30,8 @@ type Instance struct {
 	cacheFile             adapter.CacheFile
 	pauseManager          pause.Manager
 	urlTestHistoryStorage *urltest.HistoryStorage
+	urlTestSchedulerOnce  sync.Once
+	urlTestScheduler      *urlTestScheduler
 	outboundManager       adapter.OutboundManager
 	endpointManager       adapter.EndpointManager
 	logFactory            log.Factory
@@ -147,6 +150,13 @@ func attachInstance(ctx context.Context) *Instance {
 		endpointManager:       service.FromContext[adapter.EndpointManager](ctx),
 		logFactory:            service.FromContext[log.Factory](ctx),
 	}
+}
+
+func (i *Instance) manualURLTestScheduler() *urlTestScheduler {
+	i.urlTestSchedulerOnce.Do(func() {
+		i.urlTestScheduler = newURLTestScheduler(i.ctx, i.outboundManager, i.urlTestHistoryStorage, manualURLTestConcurrency)
+	})
+	return i.urlTestScheduler
 }
 
 func (i *Instance) Start() error {

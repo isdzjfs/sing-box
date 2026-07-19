@@ -24,6 +24,7 @@ type HistoryStorage struct {
 	delayHistory   map[string][]*adapter.URLTestHistory
 	checking       map[string]time.Time
 	updateHooks    []*observable.Subscriber[struct{}]
+	updateWait     chan struct{}
 }
 
 const (
@@ -36,6 +37,7 @@ func NewHistoryStorage() *HistoryStorage {
 		currentHistory: make(map[string]*adapter.URLTestHistory),
 		delayHistory:   make(map[string][]*adapter.URLTestHistory),
 		checking:       make(map[string]time.Time),
+		updateWait:     make(chan struct{}),
 	}
 }
 
@@ -46,8 +48,8 @@ func (s *HistoryStorage) AddUpdateHook(hook *observable.Subscriber[struct{}]) {
 }
 
 func (s *HistoryStorage) NotifyUpdated() {
-	s.access.RLock()
-	defer s.access.RUnlock()
+	s.access.Lock()
+	defer s.access.Unlock()
 	s.notifyUpdated()
 }
 
@@ -130,6 +132,38 @@ func (s *HistoryStorage) FinishURLTest(tag string, checkedAt time.Time) {
 	defer s.access.Unlock()
 	if checkingAt, loaded := s.checking[tag]; loaded && checkingAt.Equal(checkedAt) {
 		delete(s.checking, tag)
+		s.notifyWaiters()
+	}
+}
+
+func (s *HistoryStorage) URLTestCheckingAt(tag string) (time.Time, bool) {
+	if s == nil {
+		return time.Time{}, false
+	}
+	s.access.RLock()
+	defer s.access.RUnlock()
+	checkingAt, loaded := s.checking[tag]
+	return checkingAt, loaded
+}
+
+func (s *HistoryStorage) WaitURLTestResult(ctx context.Context, tag string, checkedAt time.Time) (*adapter.URLTestHistory, error) {
+	for {
+		s.access.RLock()
+		history := s.lastHistoryLocked(tag)
+		checkingAt, checking := s.checking[tag]
+		updateWait := s.updateWait
+		s.access.RUnlock()
+		if history != nil && !history.Time.Before(checkedAt) {
+			return history, nil
+		}
+		if !checking || checkingAt.After(checkedAt) {
+			return nil, context.Canceled
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-updateWait:
+		}
 	}
 }
 
@@ -172,9 +206,15 @@ func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTes
 }
 
 func (s *HistoryStorage) notifyUpdated() {
+	s.notifyWaiters()
 	for _, updateHook := range s.updateHooks {
 		updateHook.Emit(struct{}{})
 	}
+}
+
+func (s *HistoryStorage) notifyWaiters() {
+	close(s.updateWait)
+	s.updateWait = make(chan struct{})
 }
 
 func (s *HistoryStorage) Close() error {
@@ -182,6 +222,7 @@ func (s *HistoryStorage) Close() error {
 	defer s.access.Unlock()
 	s.checking = nil
 	s.updateHooks = nil
+	s.notifyWaiters()
 	return nil
 }
 

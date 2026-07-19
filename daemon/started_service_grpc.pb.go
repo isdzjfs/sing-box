@@ -26,6 +26,7 @@ const (
 	StartedService_SubscribeClashMode_FullMethodName             = "/daemon.StartedService/SubscribeClashMode"
 	StartedService_SetClashMode_FullMethodName                   = "/daemon.StartedService/SetClashMode"
 	StartedService_URLTest_FullMethodName                        = "/daemon.StartedService/URLTest"
+	StartedService_URLTestItemsV2_FullMethodName                 = "/daemon.StartedService/URLTestItemsV2"
 	StartedService_SelectOutbound_FullMethodName                 = "/daemon.StartedService/SelectOutbound"
 	StartedService_SetGroupExpand_FullMethodName                 = "/daemon.StartedService/SetGroupExpand"
 	StartedService_SubscribeConnections_FullMethodName           = "/daemon.StartedService/SubscribeConnections"
@@ -66,6 +67,7 @@ type StartedServiceClient interface {
 	SubscribeClashMode(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClashMode], error)
 	SetClashMode(ctx context.Context, in *ClashMode, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	URLTest(ctx context.Context, in *URLTestRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	URLTestItemsV2(ctx context.Context, in *URLTestItemsV2Request, opts ...grpc.CallOption) (*URLTestItemsV2Response, error)
 	SelectOutbound(ctx context.Context, in *SelectOutboundRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SetGroupExpand(ctx context.Context, in *SetGroupExpandRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SubscribeConnections(ctx context.Context, in *SubscribeConnectionsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConnectionEvents], error)
@@ -248,6 +250,16 @@ func (c *startedServiceClient) URLTest(ctx context.Context, in *URLTestRequest, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, StartedService_URLTest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) URLTestItemsV2(ctx context.Context, in *URLTestItemsV2Request, opts ...grpc.CallOption) (*URLTestItemsV2Response, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(URLTestItemsV2Response)
+	err := c.cc.Invoke(ctx, StartedService_URLTestItemsV2_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -586,6 +598,7 @@ type StartedServiceServer interface {
 	SubscribeClashMode(*emptypb.Empty, grpc.ServerStreamingServer[ClashMode]) error
 	SetClashMode(context.Context, *ClashMode) (*emptypb.Empty, error)
 	URLTest(context.Context, *URLTestRequest) (*emptypb.Empty, error)
+	URLTestItemsV2(context.Context, *URLTestItemsV2Request) (*URLTestItemsV2Response, error)
 	SelectOutbound(context.Context, *SelectOutboundRequest) (*emptypb.Empty, error)
 	SetGroupExpand(context.Context, *SetGroupExpandRequest) (*emptypb.Empty, error)
 	SubscribeConnections(*SubscribeConnectionsRequest, grpc.ServerStreamingServer[ConnectionEvents]) error
@@ -661,6 +674,10 @@ func (UnimplementedStartedServiceServer) SetClashMode(context.Context, *ClashMod
 
 func (UnimplementedStartedServiceServer) URLTest(context.Context, *URLTestRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method URLTest not implemented")
+}
+
+func (UnimplementedStartedServiceServer) URLTestItemsV2(context.Context, *URLTestItemsV2Request) (*URLTestItemsV2Response, error) {
+	return nil, status.Error(codes.Unimplemented, "method URLTestItemsV2 not implemented")
 }
 
 func (UnimplementedStartedServiceServer) SelectOutbound(context.Context, *SelectOutboundRequest) (*emptypb.Empty, error) {
@@ -934,6 +951,24 @@ func _StartedService_URLTest_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(StartedServiceServer).URLTest(ctx, req.(*URLTestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_URLTestItemsV2_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(URLTestItemsV2Request)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).URLTestItemsV2(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_URLTestItemsV2_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).URLTestItemsV2(ctx, req.(*URLTestItemsV2Request))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1297,6 +1332,10 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "URLTest",
 			Handler:    _StartedService_URLTest_Handler,
+		},
+		{
+			MethodName: "URLTestItemsV2",
+			Handler:    _StartedService_URLTestItemsV2_Handler,
 		},
 		{
 			MethodName: "SelectOutbound",

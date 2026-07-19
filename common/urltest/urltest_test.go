@@ -1,6 +1,7 @@
 package urltest
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -140,4 +141,54 @@ func TestHistoryStorageReserveURLTestDoesNotStretchInterval(t *testing.T) {
 	})
 
 	require.True(t, storage.ReserveURLTest("proxy", baseTime.Add(30*time.Second), false))
+}
+
+func TestHistoryStorageWaitURLTestResultReturnsActiveCheckResult(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	require.True(t, storage.ReserveURLTest("proxy", checkedAt, true))
+
+	resultChannel := make(chan *adapter.URLTestHistory, 1)
+	go func() {
+		result, _ := storage.WaitURLTestResult(context.Background(), "proxy", checkedAt)
+		resultChannel <- result
+	}()
+	storage.StoreURLTestHistory("proxy", &adapter.URLTestHistory{Time: checkedAt, Delay: 42})
+	storage.FinishURLTest("proxy", checkedAt)
+
+	result := <-resultChannel
+	require.NotNil(t, result)
+	require.Equal(t, uint16(42), result.Delay)
+}
+
+func TestHistoryStorageWaitURLTestResultHonorsContext(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	require.True(t, storage.ReserveURLTest("proxy", checkedAt, true))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := storage.WaitURLTestResult(ctx, "proxy", checkedAt)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestHistoryStorageWaitURLTestResultStopsWhenCheckFinishes(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	require.True(t, storage.ReserveURLTest("proxy", checkedAt, true))
+
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := storage.WaitURLTestResult(context.Background(), "proxy", checkedAt)
+		resultChannel <- err
+	}()
+	storage.FinishURLTest("proxy", checkedAt)
+
+	select {
+	case err := <-resultChannel:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("waiting URL test did not stop")
+	}
 }

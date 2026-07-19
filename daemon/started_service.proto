@@ -19,6 +19,7 @@ service StartedService {
   rpc SetClashMode(ClashMode) returns(google.protobuf.Empty) {}
 
   rpc URLTest(URLTestRequest) returns(google.protobuf.Empty) {}
+  rpc URLTestItemsV2(URLTestItemsV2Request) returns(URLTestItemsV2Response) {}
   rpc SelectOutbound(SelectOutboundRequest) returns (google.protobuf.Empty) {}
   rpc SetGroupExpand(SetGroupExpandRequest) returns (google.protobuf.Empty) {}
 
@@ -631,4 +632,25 @@ message OpenVPNChallengeSubmission {
 message OpenVPNChallengeCancel {
   string endpointTag = 1;
   string challengeID = 2;
+}
+
+message URLTestItemsV2Request {
+  string requestId = 1;
+  string outboundTag = 2;
+  repeated string itemTags = 3;
+  string testURL = 4;
+  int64 timeoutMillis = 5;
+}
+
+message URLTestItemV2Result {
+  string itemTag = 1;
+  int32 delay = 2;
+  int64 testedAt = 3;
+  string errorMessage = 4;
+  bool timedOut = 5;
+}
+
+message URLTestItemsV2Response {
+  string requestId = 1;
+  repeated URLTestItemV2Result results = 2;
 }
