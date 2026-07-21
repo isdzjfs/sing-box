@@ -13,6 +13,18 @@ type HTTPTransport interface {
 	http.RoundTripper
 	CloseIdleConnections()
 	Reset()
+	Info() HTTPTransportInfo
+}
+
+// HTTPTransportInfo contains only non-secret fields that are safe to include in
+// request failure logs. In particular, headers, credentials and TLS material are
+// intentionally excluded.
+type HTTPTransportInfo struct {
+	Tag             string
+	Detour          string
+	Engine          string
+	Version         int
+	DefaultOutbound bool
 }
 
 type HTTPClientManager interface {
