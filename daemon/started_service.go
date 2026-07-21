@@ -197,6 +197,21 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
 		return os.ErrInvalid
 	}
 	oldInstance := s.instance
+	// Build the replacement while the current instance is still serving traffic.  Android keeps
+	// the established TUN alive during reload, so closing the old instance first would black-hole
+	// bootstrap DNS used to initialize proxy-routed remote rule sets.
+	if oldInstance == nil {
+		s.updateStatus(ServiceStatus_STARTING)
+	}
+	s.resetLogs()
+	instance, err := s.newInstance(profileContent, options)
+	if err != nil {
+		if oldInstance != nil {
+			s.serviceAccess.Unlock()
+			return err
+		}
+		return s.updateStatusError(err)
+	}
 	if oldInstance != nil {
 		s.instance = nil
 		s.updateStatus(ServiceStatus_STOPPING)
@@ -204,12 +219,7 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
 		_ = oldInstance.Close()
 		runtimeDebug.FreeOSMemory()
 		s.serviceAccess.Lock()
-	}
-	s.updateStatus(ServiceStatus_STARTING)
-	s.resetLogs()
-	instance, err := s.newInstance(profileContent, options)
-	if err != nil {
-		return s.updateStatusError(err)
+		s.updateStatus(ServiceStatus_STARTING)
 	}
 	s.instance = instance
 	instance.urlTestHistoryStorage.AddUpdateHook(s.urlTestSubscriber)
