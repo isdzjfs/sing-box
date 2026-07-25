@@ -39,6 +39,12 @@ var _ adapter.RuleSet = (*RemoteRuleSet)(nil)
 // (a few hundred KB) over a slow link.
 const ruleSetFetchTimeout = 20 * time.Second
 
+// ruleSetFallbackBudget bounds the fallback chain as a whole. Since rule-set initialization no
+// longer fails fast, every rule-set that cannot reach its configured source walks its fallbacks, and
+// bounding only each attempt would let one slow network turn into minutes of startup with no
+// working route. One rule-set therefore costs at most ruleSetFetchTimeout + this.
+const ruleSetFallbackBudget = 30 * time.Second
+
 type RemoteRuleSet struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -270,6 +276,15 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 		s.logger.Debug("rule-set ", s.tag, " has no direct fallback: ", err)
 		return firstErr
 	}
+	// The direct transport is not registered with the start context, so nothing else will ever drop
+	// its keep-alive connections. Release them here instead of holding a descriptor per fallback
+	// source for the lifetime of the process.
+	defer directClient.CloseIdleConnections()
+	// Bound the whole chain rather than each attempt: with fail-fast removed, every rule-set now
+	// runs its fallbacks, and a per-attempt timeout alone would let one slow network multiply into
+	// minutes of startup during which there is no working route.
+	ctx, cancel := context.WithTimeout(ctx, ruleSetFallbackBudget)
+	defer cancel()
 	// ruleSetMirrorURLs returns a fresh slice, so appending the original URL cannot alias anything.
 	for _, fallbackURL := range append(ruleSetMirrorURLs(s.url), s.url) {
 		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart)
