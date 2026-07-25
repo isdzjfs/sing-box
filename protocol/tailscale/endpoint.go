@@ -68,6 +68,7 @@ import (
 
 var (
 	_ adapter.OutboundWithPreferredRoutes = (*Endpoint)(nil)
+	_ adapter.InterfaceUpdateListener     = (*Endpoint)(nil)
 	_ dialer.PacketDialerWithDestination  = (*Endpoint)(nil)
 	_ tun.Port                            = (*Endpoint)(nil)
 )
@@ -328,7 +329,9 @@ func (t *Endpoint) start() error {
 			return err
 		}
 		systemDialer, err := dialer.NewDefault(t.ctx, option.DialerOptions{
-			BindInterface: tunName,
+			AbstractDialerOptions: option.AbstractDialerOptions{
+				BindInterface: tunName,
+			},
 		})
 		if err != nil {
 			_ = systemTun.Close()
@@ -696,6 +699,16 @@ func (t *Endpoint) Close() error {
 	return err
 }
 
+func (t *Endpoint) InterfaceUpdated() {
+	if !t.started.Load() {
+		return
+	}
+	netMon, loaded := t.server.Sys().NetMon.GetOK()
+	if loaded && netMon != nil {
+		netMon.InjectEvent()
+	}
+}
+
 func (t *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	switch network {
 	case N.NetworkTCP:
@@ -836,12 +849,17 @@ func (t *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.
 	metadata.Inbound = t.Tag()
 	metadata.InboundType = t.Type()
 	metadata.Source = source
-	addr4, addr6 := t.server.TailscaleIPs()
-	switch destination.Addr {
-	case addr4:
-		destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
-	case addr6:
-		destination.Addr = netip.IPv6Loopback()
+	destinationAddress := tsaddr.UnmapVia(destination.Addr)
+	if destinationAddress != destination.Addr {
+		destination.Addr = destinationAddress
+	} else {
+		addr4, addr6 := t.server.TailscaleIPs()
+		switch destination.Addr {
+		case addr4:
+			destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
+		case addr6:
+			destination.Addr = netip.IPv6Loopback()
+		}
 	}
 	metadata.Destination = destination
 	t.logger.InfoContext(ctx, "inbound connection from ", source)
@@ -854,16 +872,22 @@ func (t *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
 	metadata.Inbound = t.Tag()
 	metadata.InboundType = t.Type()
 	metadata.Source = source
-	addr4, addr6 := t.server.TailscaleIPs()
-	switch destination.Addr {
-	case addr4:
-		metadata.OriginDestination = destination
-		destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
-		conn = bufio.NewNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, destination)
-	case addr6:
-		metadata.OriginDestination = destination
-		destination.Addr = netip.IPv6Loopback()
-		conn = bufio.NewNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, destination)
+	originDestination := destination
+	destinationAddress := tsaddr.UnmapVia(destination.Addr)
+	if destinationAddress != destination.Addr {
+		destination.Addr = destinationAddress
+	} else {
+		addr4, addr6 := t.server.TailscaleIPs()
+		switch destination.Addr {
+		case addr4:
+			destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
+		case addr6:
+			destination.Addr = netip.IPv6Loopback()
+		}
+	}
+	if destination != originDestination {
+		metadata.OriginDestination = originDestination
+		conn = bufio.NewNATPacketConn(bufio.NewNetPacketConn(conn), originDestination, destination)
 	}
 	metadata.Destination = destination
 	t.logger.InfoContext(ctx, "inbound packet connection from ", source)

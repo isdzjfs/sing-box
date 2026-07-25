@@ -188,7 +188,7 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
 	}
 }
 
-func (s *StartedService) StartOrReloadService(profileContent string, options *OverrideOptions) error {
+func (s *StartedService) StartOrReloadService(ctx context.Context, profileContent string, options *OverrideOptions) error {
 	s.serviceAccess.Lock()
 	switch s.serviceStatus.Status {
 	case ServiceStatus_IDLE, ServiceStatus_STARTED, ServiceStatus_STARTING, ServiceStatus_FATAL:
@@ -204,7 +204,7 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
 		s.updateStatus(ServiceStatus_STARTING)
 	}
 	s.resetLogs()
-	instance, err := s.newInstance(profileContent, options)
+	instance, err := s.newInstance(ctx, profileContent, options)
 	if err != nil {
 		if oldInstance != nil {
 			s.serviceAccess.Unlock()
@@ -619,33 +619,32 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	}
 	boxService := s.instance
 	s.serviceAccess.RUnlock()
-	groupTag := request.OutboundTag
-	abstractOutboundGroup, isLoaded := boxService.outboundManager.Outbound(groupTag)
+	outboundTag := request.OutboundTag
+	outbound, isLoaded := boxService.outboundManager.Outbound(outboundTag)
 	if !isLoaded {
-		return nil, status.Error(codes.NotFound, "outbound group not found: "+groupTag)
+		return nil, status.Error(codes.NotFound, "outbound not found: "+outboundTag)
 	}
-	outboundGroup, isOutboundGroup := abstractOutboundGroup.(adapter.OutboundGroup)
-	if !isOutboundGroup {
-		return nil, status.Error(codes.InvalidArgument, "outbound is not a group: "+groupTag)
-	}
-	urlTest, isURLTest := abstractOutboundGroup.(*group.URLTest)
+	historyStorage := boxService.urlTestHistoryStorage
+	urlTest, isURLTest := outbound.(*group.URLTest)
+	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
 	testURL := ""
 	if isURLTest {
 		testURL = urlTest.TestURL()
 	}
 	if request.ItemTag != "" {
-		outboundToTest, err := outboundInGroup(boxService, outboundGroup, groupTag, request.ItemTag)
+		if !isOutboundGroup {
+			return nil, status.Error(codes.InvalidArgument, "outbound is not a group: "+outboundTag)
+		}
+		outboundToTest, err := outboundInGroup(boxService, outboundGroup, outboundTag, request.ItemTag)
 		if err != nil {
 			return nil, err
 		}
-		go runURLTest(boxService.ctx, boxService.urlTestHistoryStorage, outboundToTest, testURL)
+		go runURLTest(boxService.ctx, historyStorage, outboundToTest, testURL)
 		return &emptypb.Empty{}, nil
 	}
 	if isURLTest {
 		go urlTest.CheckOutbounds()
-	} else {
-		historyStorage := boxService.urlTestHistoryStorage
-
+	} else if isOutboundGroup {
 		outbounds := common.Filter(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
 			itOutbound, _ := boxService.outboundManager.Outbound(it)
 			return itOutbound
@@ -659,12 +658,14 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 		b, _ := batch.New(boxService.ctx, batch.WithConcurrencyNum[any](10))
 		for _, detour := range outbounds {
 			outboundToTest := detour
-			outboundTag := outboundToTest.Tag()
-			b.Go(outboundTag, func() (any, error) {
+			itemTag := outboundToTest.Tag()
+			b.Go(itemTag, func() (any, error) {
 				runURLTest(boxService.ctx, historyStorage, outboundToTest, testURL)
 				return nil, nil
 			})
 		}
+	} else {
+		go runURLTest(boxService.ctx, historyStorage, outbound, "")
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -1081,10 +1082,11 @@ func (s *StartedService) GetDeprecatedWarnings(ctx context.Context, empty *empty
 		return &DeprecatedWarnings{}, nil
 	}
 	notes := manager.Get()
+	selectedLocale := locale.FromContext(ctx)
 	return &DeprecatedWarnings{
 		Warnings: common.Map(notes, func(it deprecated.Note) *DeprecatedWarning {
 			return &DeprecatedWarning{
-				Message:           it.Message(),
+				Message:           it.MessageForLocale(selectedLocale),
 				Impending:         it.Impending(),
 				MigrationLink:     it.MigrationLink,
 				Description:       it.Description,
@@ -1664,35 +1666,49 @@ func openConnectEndpointStatusToProto(tag string, endpointStatus adapter.OpenCon
 		Error:       endpointStatus.Error,
 		TunnelInfo:  openConnectTunnelInfoToProto(endpointStatus.TunnelInfo),
 	}
-	if endpointStatus.AuthForm != nil {
-		fields := common.Map(endpointStatus.AuthForm.Fields, func(field adapter.OpenConnectAuthFormField) *OpenConnectAuthFormField {
-			return &OpenConnectAuthFormField{
-				SubmissionKey: field.SubmissionKey,
-				Name:          field.Name,
-				Label:         field.Label,
-				Kind:          field.Kind,
-				Value:         field.Value,
-				Options: common.Map(field.Options, func(option adapter.OpenConnectAuthFormChoice) *OpenConnectAuthFormChoice {
-					return &OpenConnectAuthFormChoice{
-						Value: option.Value,
-						Label: option.Label,
+	if endpointStatus.AuthChallenge != nil {
+		challenge := &OpenConnectAuthChallenge{
+			Id:      endpointStatus.AuthChallenge.ID,
+			Banner:  endpointStatus.AuthChallenge.Banner,
+			Message: endpointStatus.AuthChallenge.Message,
+			Error:   endpointStatus.AuthChallenge.Error,
+		}
+		if endpointStatus.AuthChallenge.Form != nil {
+			challenge.Challenge = &OpenConnectAuthChallenge_Form{Form: &OpenConnectAuthForm{
+				Fields: common.Map(endpointStatus.AuthChallenge.Form.Fields, func(field adapter.OpenConnectAuthFormField) *OpenConnectAuthFormField {
+					return &OpenConnectAuthFormField{
+						SubmissionKey: field.SubmissionKey,
+						Name:          field.Name,
+						Label:         field.Label,
+						Kind:          field.Kind,
+						Value:         field.Value,
+						Options: common.Map(field.Options, func(option adapter.OpenConnectAuthFormChoice) *OpenConnectAuthFormChoice {
+							return &OpenConnectAuthFormChoice{
+								Value: option.Value,
+								Label: option.Label,
+							}
+						}),
 					}
 				}),
-			}
-		})
-		result.AuthForm = &OpenConnectAuthForm{
-			Id:      endpointStatus.AuthForm.ID,
-			Banner:  endpointStatus.AuthForm.Banner,
-			Message: endpointStatus.AuthForm.Message,
-			Error:   endpointStatus.AuthForm.Error,
-			Url:     endpointStatus.AuthForm.URL,
-			Fields:  fields,
+			}}
 		}
+		if endpointStatus.AuthChallenge.Browser != nil {
+			challenge.Challenge = &OpenConnectAuthChallenge_Browser{Browser: &OpenConnectBrowserRequest{
+				Url:                 endpointStatus.AuthChallenge.Browser.URL,
+				FinalURL:            endpointStatus.AuthChallenge.Browser.FinalURL,
+				CookieNames:         endpointStatus.AuthChallenge.Browser.CookieNames,
+				EarlyCookieNames:    endpointStatus.AuthChallenge.Browser.EarlyCookieNames,
+				HeaderNames:         endpointStatus.AuthChallenge.Browser.HeaderNames,
+				CallbackURLPrefixes: endpointStatus.AuthChallenge.Browser.CallbackURLPrefixes,
+				CacheID:             endpointStatus.AuthChallenge.Browser.CacheID,
+			}}
+		}
+		result.AuthChallenge = challenge
 	}
 	return result
 }
 
-func (s *StartedService) SubmitOpenConnectAuthForm(ctx context.Context, request *OpenConnectAuthFormSubmission) (*emptypb.Empty, error) {
+func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, request *OpenConnectAuthResponseSubmission) (*emptypb.Empty, error) {
 	err := s.waitForStarted(ctx)
 	if err != nil {
 		return nil, err
@@ -1705,14 +1721,31 @@ func (s *StartedService) SubmitOpenConnectAuthForm(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	err = endpoint.CompleteAuthForm(request.FormID, request.Values)
+	var authResponse adapter.OpenConnectAuthResponse
+	form := request.GetForm()
+	if form != nil {
+		authResponse.Form = &adapter.OpenConnectAuthFormResponse{Values: form.Values}
+	}
+	browser := request.GetBrowser()
+	if browser != nil {
+		authResponse.Browser = &adapter.OpenConnectBrowserResult{
+			FinalURL: browser.FinalURL,
+			Cookies: common.Map(browser.Cookies, func(cookie *OpenConnectBrowserCookie) adapter.OpenConnectBrowserCookie {
+				return adapter.OpenConnectBrowserCookie{Name: cookie.Name, Value: cookie.Value}
+			}),
+			Headers: common.Map(browser.Headers, func(header *OpenConnectBrowserHeader) adapter.OpenConnectBrowserHeader {
+				return adapter.OpenConnectBrowserHeader{Name: header.Name, Values: header.Values}
+			}),
+		}
+	}
+	err = endpoint.CompleteAuthChallenge(request.ChallengeID, authResponse)
 	if err != nil {
 		return nil, err
 	}
 	return &emptypb.Empty{}, nil
 }
 
-func (s *StartedService) CancelOpenConnectAuthForm(ctx context.Context, request *OpenConnectAuthFormCancel) (*emptypb.Empty, error) {
+func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, request *OpenConnectAuthChallengeCancel) (*emptypb.Empty, error) {
 	err := s.waitForStarted(ctx)
 	if err != nil {
 		return nil, err
@@ -1725,7 +1758,7 @@ func (s *StartedService) CancelOpenConnectAuthForm(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	err = endpoint.CancelAuthForm(request.FormID)
+	err = endpoint.CancelAuthChallenge(request.ChallengeID)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/schema"
 	E "github.com/sagernet/sing/common/exceptions"
 	sing_json "github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -15,7 +16,7 @@ import (
 )
 
 type _V2RayTransportOptions struct {
-	Type               string                  `json:"type"`
+	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp,splithttp"`
 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
 	QUICOptions        V2RayQUICOptions        `json:"-"`
@@ -76,6 +77,20 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 	return nil
+}
+
+func (o V2RayTransportOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("V2RayTransport", func() (*schema.Node, error) {
+		return schema.DiscriminatedUnion(builder, "type", true, []schema.UnionVariant{
+			{Value: C.V2RayTransportTypeHTTP, StructType: reflect.TypeFor[V2RayHTTPOptions]()},
+			{Value: C.V2RayTransportTypeWebsocket, StructType: reflect.TypeFor[V2RayWebsocketOptions]()},
+			{Value: C.V2RayTransportTypeQUIC, StructType: reflect.TypeFor[V2RayQUICOptions]()},
+			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
+			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
+			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
+			{Value: C.V2RayTransportTypeSplitHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
+		}, nil)
+	})
 }
 
 type V2RayHTTPOptions struct {
@@ -169,6 +184,18 @@ func (o *V2RayXHTTPRangeOptions) UnmarshalJSON(data []byte) error {
 	}
 }
 
+func (o V2RayXHTTPRangeOptions) DescribeSchema(_ schema.Builder) (*schema.Node, error) {
+	objectForm := schema.StrictObject()
+	objectForm.Properties.Put("from", schema.IntegerNode())
+	objectForm.Properties.Put("to", schema.IntegerNode())
+	return schema.AnyOf(
+		schema.StringNode(),
+		&schema.Node{Type: "array", Items: schema.IntegerNode()},
+		objectForm,
+		schema.IntegerNode(),
+	), nil
+}
+
 func parseV2RayXHTTPRange(rangeValue string) (int32, int32, error) {
 	rangeValue = strings.TrimSpace(rangeValue)
 	if rangeValue == "" {
@@ -221,6 +248,16 @@ type V2RayXHTTPOptions struct {
 	DownloadSettings     *V2RayXHTTPDownloadOptions `json:"download_settings,omitempty"`
 }
 
+func (o V2RayXHTTPOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("V2RayXHTTPOptions", func() (*schema.Node, error) {
+		objectForm := schema.StrictObject()
+		if err := builder.FlattenStruct(objectForm, reflect.TypeFor[V2RayXHTTPOptions]()); err != nil {
+			return nil, err
+		}
+		return objectForm, nil
+	})
+}
+
 type V2RayXHTTPXMuxOptions struct {
 	MaxConcurrency   *V2RayXHTTPRangeOptions `json:"max_concurrency,omitempty"`
 	MaxConnections   *V2RayXHTTPRangeOptions `json:"max_connections,omitempty"`
@@ -228,6 +265,14 @@ type V2RayXHTTPXMuxOptions struct {
 	HMaxRequestTimes *V2RayXHTTPRangeOptions `json:"h_max_request_times,omitempty"`
 	HMaxReusableSecs *V2RayXHTTPRangeOptions `json:"h_max_reusable_secs,omitempty"`
 	HKeepAlivePeriod int64                   `json:"h_keep_alive_period,omitempty"`
+}
+
+func (o V2RayXHTTPXMuxOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	objectForm := schema.StrictObject()
+	if err := builder.FlattenStruct(objectForm, reflect.TypeFor[V2RayXHTTPXMuxOptions]()); err != nil {
+		return nil, err
+	}
+	return objectForm, nil
 }
 
 type V2RayXHTTPDownloadOptions struct {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"runtime"
 	"slices"
 	"sync"
 	"syscall"
@@ -14,7 +13,6 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/gtcpip/header"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -48,7 +46,9 @@ func newSystemDevice(options DeviceOptions) (*systemDevice, error) {
 		options.MTU = DefaultMTU
 	}
 	interfaceDialer, err := dialer.NewDefault(options.Context, option.DialerOptions{
-		BindInterface: options.Name,
+		AbstractDialerOptions: option.AbstractDialerOptions{
+			BindInterface: options.Name,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -96,30 +96,21 @@ func (d *systemDevice) buildTunOptions() tun.Options {
 	d.inet4Address = inet4Address
 	d.inet6Address = inet6Address
 	inet4Addresses, inet6Addresses := splitPrefixes(d.options.Configuration.Addresses)
-	inet4Routes, inet6Routes := splitPrefixes(common.Map(d.options.Configuration.Routes, func(route Route) netip.Prefix { return route.Prefix }))
-	inet4ExcludedRoutes, inet6ExcludedRoutes := splitPrefixes(common.Map(d.options.Configuration.ExcludedRoutes, func(route Route) netip.Prefix { return route.Prefix }))
 	networkManager := service.FromContext[adapter.NetworkManager](d.options.Context)
 	tunOptions := tun.Options{
-		Name:                     d.options.Name,
-		Inet4Address:             inet4Addresses,
-		Inet6Address:             inet6Addresses,
-		MTU:                      d.options.MTU,
-		GSO:                      true,
-		InterfaceScope:           true,
-		DNSAddress:               d.options.Configuration.DNS,
-		Inet4RouteAddress:        inet4Routes,
-		Inet6RouteAddress:        inet6Routes,
-		Inet4RouteExcludeAddress: inet4ExcludedRoutes,
-		Inet6RouteExcludeAddress: inet6ExcludedRoutes,
-		InterfaceMonitor:         nil,
-		InterfaceFinder:          nil,
-		Logger:                   d.options.Logger,
-		IPRoute2TableIndex:       tun.DefaultIPRoute2TableIndex,
-		IPRoute2RuleIndex:        tun.DefaultIPRoute2RuleIndex,
-		EXP_DisableDNSHijack:     true,
-	}
-	if runtime.GOOS == "darwin" {
-		tunOptions.AutoRoute = true
+		Name:                 d.options.Name,
+		Inet4Address:         inet4Addresses,
+		Inet6Address:         inet6Addresses,
+		MTU:                  d.options.MTU,
+		GSO:                  true,
+		InterfaceScope:       true,
+		DNSMode:              tun.DNSModeDisabled,
+		InterfaceMonitor:     nil,
+		InterfaceFinder:      nil,
+		Logger:               d.options.Logger,
+		IPRoute2TableIndex:   tun.DefaultIPRoute2TableIndex,
+		IPRoute2RuleIndex:    tun.DefaultIPRoute2RuleIndex,
+		EXP_DisableDNSHijack: true,
 	}
 	if networkManager != nil {
 		tunOptions.InterfaceMonitor = networkManager.InterfaceMonitor()
@@ -150,7 +141,7 @@ func (d *systemDevice) readLoop(tunInterface tun.Tun, mtu int) {
 				return
 			}
 			d.options.Logger.Error(E.Cause(err, "read packet"))
-			continue
+			return
 		}
 		if readN <= tun.PacketOffset {
 			continue
@@ -162,6 +153,7 @@ func (d *systemDevice) readLoop(tunInterface tun.Tun, mtu int) {
 		packetBuffer.DecRef()
 		if err != nil {
 			d.options.Logger.Error(E.Cause(err, "write packet"))
+			return
 		}
 	}
 }
@@ -192,6 +184,7 @@ func (d *systemDevice) readLoopLinux(tunInterface tun.LinuxTUN, batchSize int, m
 			}
 			if writeErr != nil {
 				d.options.Logger.Error(E.Cause(writeErr, "write packet batch"))
+				return
 			}
 		}
 		if readErr != nil {
@@ -199,6 +192,7 @@ func (d *systemDevice) readLoopLinux(tunInterface tun.LinuxTUN, batchSize int, m
 				return
 			}
 			d.options.Logger.Error(E.Cause(readErr, "batch read packet"))
+			return
 		}
 	}
 }
@@ -218,6 +212,7 @@ func (d *systemDevice) readLoopDarwin(tunInterface tun.DarwinTUN) {
 			writeErr := d.writeOutbound(outboundBuffers)
 			if writeErr != nil {
 				d.options.Logger.Error(E.Cause(writeErr, "write packet batch"))
+				return
 			}
 		}
 		if readErr != nil {
@@ -225,6 +220,7 @@ func (d *systemDevice) readLoopDarwin(tunInterface tun.DarwinTUN) {
 				return
 			}
 			d.options.Logger.Error(E.Cause(readErr, "batch read packet"))
+			return
 		}
 	}
 }
@@ -247,13 +243,12 @@ func (d *systemDevice) UpdateConfiguration(configuration Configuration) error {
 		return nil
 	}
 	if !slices.Equal(previousConfiguration.Addresses, configuration.Addresses) ||
-		previousMTU != updatedMTU ||
-		!slices.Equal(previousConfiguration.DNS, configuration.DNS) {
+		previousMTU != updatedMTU {
 		d.device.Close()
 		d.device = nil
 		return d.startLocked()
 	}
-	return d.device.UpdateRouteOptions(d.buildTunOptions())
+	return nil
 }
 
 func (d *systemDevice) WriteInboundBuffers(packetBuffers []*buf.Buffer) error {
@@ -265,7 +260,7 @@ func (d *systemDevice) writeBuffers(packetBuffers []*buf.Buffer) error {
 	tunInterface := d.device
 	d.stateAccess.RUnlock()
 	if tunInterface == nil {
-		return E.New("OpenConnect system device is not ready")
+		return E.New("system device is not ready")
 	}
 	linuxTUN, isLinuxTUN := tunInterface.(tun.LinuxTUN)
 	if isLinuxTUN {
@@ -308,7 +303,7 @@ func (d *systemDevice) writePacket(packet []byte) error {
 	tunInterface := d.device
 	d.stateAccess.RUnlock()
 	if tunInterface == nil {
-		return E.New("OpenConnect system device is not ready")
+		return E.New("system device is not ready")
 	}
 	if tun.PacketOffset == 0 {
 		_, err := tunInterface.Write(packet)

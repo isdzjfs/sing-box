@@ -73,7 +73,7 @@ func (s *ManualURLTestService) Start(configContent string) error {
 	if s.closed {
 		return context.Canceled
 	}
-	return s.server.StartedService.StartOrReloadService(configContent, &daemon.OverrideOptions{})
+	return s.server.StartedService.StartOrReloadService(s.server.ctx, configContent, &daemon.OverrideOptions{})
 }
 
 func (s *ManualURLTestService) URLTestItems(

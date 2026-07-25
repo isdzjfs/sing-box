@@ -13,7 +13,7 @@ func TestReloadPreparationFailureKeepsCurrentInstance(t *testing.T) {
 	startedService.instance = currentInstance
 	startedService.serviceStatus = &ServiceStatus{Status: ServiceStatus_STARTED}
 
-	err := startedService.StartOrReloadService("{", nil)
+	err := startedService.StartOrReloadService(context.Background(), "{", nil)
 	if err == nil {
 		t.Fatal("expected invalid replacement config to fail")
 	}

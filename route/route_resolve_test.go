@@ -96,6 +96,16 @@ func (r *resolveTestDNSRouter) Exchange(ctx context.Context, message *dns.Msg, o
 	return nil, nil
 }
 
+func (r *resolveTestDNSRouter) ExchangeAsync(
+	ctx context.Context,
+	message *dns.Msg,
+	options adapter.DNSQueryOptions,
+	callback func(response *dns.Msg, err error),
+) {
+	response, err := r.Exchange(ctx, message, options)
+	callback(response, err)
+}
+
 func (r *resolveTestDNSRouter) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
 	r.lookupCount++
 	r.domain = domain

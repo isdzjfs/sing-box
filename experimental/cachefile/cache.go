@@ -46,6 +46,7 @@ type CacheFile struct {
 	path               string
 	cacheID            []byte
 	storeSelected      bool
+	cacheIDText        string
 	storeFakeIP        bool
 	storeRDRC          bool
 	storeDNS           bool
@@ -109,6 +110,7 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
 		logger:        logger,
 		path:          filemanager.BasePath(ctx, path),
 		cacheID:       cacheIDBytes,
+		cacheIDText:   options.CacheID,
 		storeSelected: storeSelected,
 		storeFakeIP:   options.StoreFakeIP,
 		storeRDRC:     options.StoreRDRC,
@@ -128,6 +130,10 @@ func (c *CacheFile) Name() string {
 
 func (c *CacheFile) Dependencies() []string {
 	return nil
+}
+
+func (c *CacheFile) CacheID() string {
+	return c.cacheIDText
 }
 
 func (c *CacheFile) SetOptimisticTimeout(timeout time.Duration) {

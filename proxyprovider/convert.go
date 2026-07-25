@@ -204,11 +204,13 @@ func convertSnell(provider option.ProxyProvider, proxy map[string]any, domainRes
 		return nil, unsupportedProxyTypeError{proxyType: fmt.Sprintf("snell v%d", version)}
 	}
 	options := &option.SnellOutboundOptions{
-		ServerOptions: serverOptions(proxy),
-		Version:       version,
-		PSK:           stringValue(proxy, "psk"),
-		Reuse:         boolValueDefault(proxy, "reuse"),
-		Network:       snellNetworkList(provider, proxy),
+		Version: version,
+		AbstractSnellOutboundOptions: option.AbstractSnellOutboundOptions{
+			ServerOptions: serverOptions(proxy),
+			PSK:           stringValue(proxy, "psk"),
+			Reuse:         boolValueDefault(proxy, "reuse"),
+			Network:       snellNetworkList(provider, proxy),
+		},
 	}
 	if userKey := stringValue(proxy, "userkey", "user-key", "user_key"); userKey != "" {
 		options.UserKey = userKey
