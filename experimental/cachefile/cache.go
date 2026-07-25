@@ -341,6 +341,17 @@ func (c *CacheFile) createBucket(t *bbolt.Tx, key []byte) (*bbolt.Bucket, error)
 	return bucket.CreateBucketIfNotExists(key)
 }
 
+// sharedBucket ignores cacheID. Rule-set payloads are addressed by their source URL, so the same
+// URL always yields the same content regardless of which profile references it. Namespacing them
+// per cacheID would force every new profile to re-download rule-sets another profile already has.
+func (c *CacheFile) sharedBucket(t *bbolt.Tx, key []byte) *bbolt.Bucket {
+	return t.Bucket(key)
+}
+
+func (c *CacheFile) createSharedBucket(t *bbolt.Tx, key []byte) (*bbolt.Bucket, error) {
+	return t.CreateBucketIfNotExists(key)
+}
+
 func (c *CacheFile) LoadSelected(group string) string {
 	if !c.storeSelected {
 		return ""
@@ -403,14 +414,16 @@ func (c *CacheFile) StoreGroupExpand(group string, isExpand bool) error {
 	})
 }
 
-func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
+// LoadRuleSet and SaveRuleSet are keyed by the caller-supplied content key (derived from the
+// rule-set source URL), not by tag, and live in a bucket shared by every cacheID.
+func (c *CacheFile) LoadRuleSet(key string) *adapter.SavedBinary {
 	var savedSet adapter.SavedBinary
 	err := c.view(func(t *bbolt.Tx) error {
-		bucket := c.bucket(t, bucketRuleSet)
+		bucket := c.sharedBucket(t, bucketRuleSet)
 		if bucket == nil {
 			return os.ErrNotExist
 		}
-		setBinary := bucket.Get([]byte(tag))
+		setBinary := bucket.Get([]byte(key))
 		if len(setBinary) == 0 {
 			return os.ErrInvalid
 		}
@@ -422,9 +435,9 @@ func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
 	return &savedSet
 }
 
-func (c *CacheFile) SaveRuleSet(tag string, set *adapter.SavedBinary) error {
+func (c *CacheFile) SaveRuleSet(key string, set *adapter.SavedBinary) error {
 	return c.batch(func(t *bbolt.Tx) error {
-		bucket, err := c.createBucket(t, bucketRuleSet)
+		bucket, err := c.createSharedBucket(t, bucketRuleSet)
 		if err != nil {
 			return err
 		}
@@ -432,6 +445,6 @@ func (c *CacheFile) SaveRuleSet(tag string, set *adapter.SavedBinary) error {
 		if err != nil {
 			return err
 		}
-		return bucket.Put([]byte(tag), setBinary)
+		return bucket.Put([]byte(key), setBinary)
 	})
 }

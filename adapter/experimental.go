@@ -52,8 +52,10 @@ type CacheFile interface {
 	StoreSelected(group string, selected string) error
 	LoadGroupExpand(group string) (isExpand bool, loaded bool)
 	StoreGroupExpand(group string, expand bool) error
-	LoadRuleSet(tag string) *SavedBinary
-	SaveRuleSet(tag string, set *SavedBinary) error
+	// Rule-set entries are keyed by a content key derived from the source URL, so that identical
+	// remote rule-sets are shared across profiles instead of being cached per cacheID.
+	LoadRuleSet(key string) *SavedBinary
+	SaveRuleSet(key string, set *SavedBinary) error
 }
 
 type SavedBinary struct {

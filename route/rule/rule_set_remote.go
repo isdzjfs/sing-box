@@ -3,6 +3,8 @@ package rule
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -31,6 +33,12 @@ import (
 
 var _ adapter.RuleSet = (*RemoteRuleSet)(nil)
 
+// ruleSetFetchTimeout bounds a single fetch attempt, including the response body. Without it a
+// source that accepts the connection and then stalls would hold up the whole start, and the
+// fallback chain would never be reached. Generous enough for the largest rule-sets in common use
+// (a few hundred KB) over a slow link.
+const ruleSetFetchTimeout = 20 * time.Second
+
 type RemoteRuleSet struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -38,6 +46,7 @@ type RemoteRuleSet struct {
 	outbound       adapter.OutboundManager
 	tag            string
 	url            string
+	cacheKey       string
 	initialPath    string
 	options        option.RuleSet
 	updateInterval time.Duration
@@ -47,6 +56,9 @@ type RemoteRuleSet struct {
 	metadata       adapter.RuleSetMetadata
 	lastUpdated    time.Time
 	lastEtag       string
+	lastEtagURL    string
+	directAccess   sync.Mutex
+	directClient   *http.Client
 	cacheFile      adapter.CacheFile
 	pauseManager   pause.Manager
 	callbacks      list.List[adapter.RuleSetUpdateCallback]
@@ -66,18 +78,29 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 		initialPath = filemanager.BasePath(ctx, strings.ReplaceAll(options.RemoteOptions.InitialPath, C.RuleSetTagPlaceholder, tag))
 		initialPath, _ = filepath.Abs(initialPath)
 	}
+	url := strings.ReplaceAll(options.RemoteOptions.URL, C.RuleSetTagPlaceholder, tag)
 	return &RemoteRuleSet{
 		ctx:            ctx,
 		cancel:         cancel,
 		outbound:       service.FromContext[adapter.OutboundManager](ctx),
 		logger:         logger,
 		tag:            tag,
-		url:            strings.ReplaceAll(options.RemoteOptions.URL, C.RuleSetTagPlaceholder, tag),
+		url:            url,
+		cacheKey:       ruleSetCacheKey(options.Format, url),
 		initialPath:    initialPath,
 		options:        options,
 		updateInterval: updateInterval,
 		pauseManager:   service.FromContext[pause.Manager](ctx),
 	}, nil
+}
+
+// ruleSetCacheKey addresses a cached rule-set by what it points at rather than by its tag. Two
+// profiles that reference the same URL then share one cached payload, and two profiles that reuse
+// one tag for different URLs never read each other's. Format participates because the same bytes
+// are parsed differently under source and binary.
+func ruleSetCacheKey(format string, url string) string {
+	hash := sha256.Sum256([]byte(format + "\x00" + url))
+	return hex.EncodeToString(hash[:])
 }
 
 func (s *RemoteRuleSet) Name() string {
@@ -97,13 +120,14 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
 	if s.cacheFile != nil {
-		if savedSet := s.cacheFile.LoadRuleSet(s.tag); savedSet != nil {
+		if savedSet := s.cacheFile.LoadRuleSet(s.cacheKey); savedSet != nil {
 			err = s.loadBytes(savedSet.Content)
 			if err != nil {
 				s.logger.Warn(E.Cause(err, "restore cached rule-set, will refetch"))
 			} else {
 				s.lastUpdated = savedSet.LastUpdated
 				s.lastEtag = savedSet.LastEtag
+				s.lastEtagURL = s.url
 			}
 		}
 	}
@@ -224,19 +248,79 @@ func (s *RemoteRuleSet) updateOnce() {
 	}
 }
 
+// fetch tries the configured source first and, only if that fails, falls back: known mirrors of the
+// same content over a direct connection, then the original URL over a direct connection. Trying the
+// configured source first keeps the config's intent authoritative. The fallbacks exist because a
+// brand-new profile has to download its rule-sets through a proxy that has not been validated yet,
+// and one unreachable source used to abort the whole start.
+//
+// The error returned is always the configured source's, since that is the one the user can act on.
 func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
-	s.logger.Debug("updating rule-set ", s.tag, " from URL: ", s.url)
-	request, err := http.NewRequest("GET", s.url, nil)
+	firstErr := s.fetchFrom(ctx, s.url, s.httpClient, isStart)
+	if firstErr == nil {
+		return nil
+	}
+	// A cancelled or expired caller context is not something another source can fix.
+	if ctx.Err() != nil {
+		return firstErr
+	}
+	// Only once the configured source has actually failed is a direct transport worth building.
+	directClient, err := s.resolveDirectClient()
+	if err != nil {
+		s.logger.Debug("rule-set ", s.tag, " has no direct fallback: ", err)
+		return firstErr
+	}
+	// ruleSetMirrorURLs returns a fresh slice, so appending the original URL cannot alias anything.
+	for _, fallbackURL := range append(ruleSetMirrorURLs(s.url), s.url) {
+		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart)
+		if err == nil {
+			return nil
+		}
+		s.logger.Debug("rule-set ", s.tag, " fallback source ", fallbackURL, " failed: ", err)
+		if ctx.Err() != nil {
+			return firstErr
+		}
+	}
+	return firstErr
+}
+
+// resolveDirectClient builds a detour-free transport, created on first use so that rule-sets whose
+// configured source works never pay for one. On Android this dials through the platform interface's
+// protected socket, so it genuinely leaves the tunnel.
+func (s *RemoteRuleSet) resolveDirectClient() (*http.Client, error) {
+	s.directAccess.Lock()
+	defer s.directAccess.Unlock()
+	if s.directClient != nil {
+		return s.directClient, nil
+	}
+	httpClientManager := service.FromContext[adapter.HTTPClientManager](s.ctx)
+	if httpClientManager == nil {
+		return nil, E.New("missing http client manager")
+	}
+	transport, err := httpClientManager.ResolveTransport(s.ctx, s.logger, option.HTTPClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	s.directClient = &http.Client{Transport: transport}
+	return s.directClient, nil
+}
+
+func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client *http.Client, isStart bool) error {
+	s.logger.Debug("updating rule-set ", s.tag, " from URL: ", sourceURL)
+	ctx, cancel := context.WithTimeout(ctx, ruleSetFetchTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, "GET", sourceURL, nil)
 	if err != nil {
 		return err
 	}
-	if s.lastEtag != "" {
+	// An ETag is only meaningful to the host that issued it, so never replay one across sources.
+	if s.lastEtag != "" && s.lastEtagURL == sourceURL {
 		request.Header.Set("If-None-Match", s.lastEtag)
 	}
 	if !isStart {
-		defer s.httpClient.CloseIdleConnections()
+		defer client.CloseIdleConnections()
 	}
-	response, err := s.httpClient.Do(request.WithContext(ctx))
+	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
@@ -246,10 +330,10 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	case http.StatusNotModified:
 		s.lastUpdated = time.Now()
 		if s.cacheFile != nil {
-			savedRuleSet := s.cacheFile.LoadRuleSet(s.tag)
+			savedRuleSet := s.cacheFile.LoadRuleSet(s.cacheKey)
 			if savedRuleSet != nil {
 				savedRuleSet.LastUpdated = s.lastUpdated
-				err = s.cacheFile.SaveRuleSet(s.tag, savedRuleSet)
+				err = s.cacheFile.SaveRuleSet(s.cacheKey, savedRuleSet)
 				if err != nil {
 					s.logger.Error("save rule-set updated time: ", err)
 					return nil
@@ -272,13 +356,20 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	eTagHeader := response.Header.Get("Etag")
 	if eTagHeader != "" {
 		s.lastEtag = eTagHeader
+		s.lastEtagURL = sourceURL
 	}
 	s.lastUpdated = time.Now()
 	if s.cacheFile != nil {
-		err = s.cacheFile.SaveRuleSet(s.tag, &adapter.SavedBinary{
+		// Only the configured source's ETag is worth persisting: it is the only one a later run
+		// will have a matching URL for.
+		var savedEtag string
+		if s.lastEtagURL == s.url {
+			savedEtag = s.lastEtag
+		}
+		err = s.cacheFile.SaveRuleSet(s.cacheKey, &adapter.SavedBinary{
 			LastUpdated: s.lastUpdated,
 			Content:     content,
-			LastEtag:    s.lastEtag,
+			LastEtag:    savedEtag,
 		})
 		if err != nil {
 			s.logger.Error("save rule-set cache: ", err)

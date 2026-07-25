@@ -137,19 +137,34 @@ func (r *Router) Start(stage adapter.StartStage) error {
 		if len(r.ruleSets) > 0 {
 			monitor.Start("initialize rule-set")
 			startContext = adapter.NewHTTPStartContext()
+			// A rule-set that cannot be fetched ends up empty, and an empty rule-set never matches,
+			// so the rules built on it stop firing and their traffic falls through to route.final.
+			// For most rule-sets that only costs some routing precision, which is a far better
+			// outcome than refusing to start. For the ones that would flip direct traffic onto the
+			// proxy it is not acceptable, so those still fail the start.
+			// When criticality cannot be established, every rule-set is treated as critical rather
+			// than tolerated, so an unknown importance can never silently reroute direct traffic.
+			criticalRuleSets, criticalityKnown := R.CriticalRuleSetTags(r.rules, r.outbound)
 			var ruleSetStartGroup task.Group
 			for i, ruleSet := range r.ruleSets {
 				ruleSetInPlace := ruleSet
 				ruleSetStartGroup.Append0(func(ctx context.Context) error {
 					err := ruleSetInPlace.StartContext(ctx, startContext)
-					if err != nil {
+					if err == nil {
+						return nil
+					}
+					if !criticalityKnown || criticalRuleSets[ruleSetInPlace.Name()] {
 						return E.Cause(err, "initialize rule-set[", i, "]")
 					}
+					r.logger.Warn(E.Cause(err, "initialize rule-set[", i, "], continuing without it"))
 					return nil
 				})
 			}
 			ruleSetStartGroup.Concurrency(5)
-			ruleSetStartGroup.FastFail()
+			// Deliberately not FastFail: it cancels the whole group on the first error, which kills
+			// the four healthy downloads sharing the concurrency window and discards their progress.
+			// Letting every rule-set run to completion means each success is persisted to the cache
+			// even when the start ultimately fails, so a retry only has to fetch what is missing.
 			err := ruleSetStartGroup.Run(r.ctx)
 			monitor.Finish()
 			if err != nil {
