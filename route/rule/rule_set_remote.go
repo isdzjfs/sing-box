@@ -9,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/srs"
@@ -40,7 +39,6 @@ type RemoteRuleSet struct {
 	options        option.RuleSet
 	updateInterval time.Duration
 	httpClient     *http.Client
-	httpClientInfo adapter.HTTPTransportInfo
 	access         sync.RWMutex
 	rules          []adapter.HeadlessRule
 	metadata       adapter.RuleSetMetadata
@@ -89,7 +87,6 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	}
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
-	s.httpClientInfo = transport.Info()
 	if s.cacheFile != nil {
 		if savedSet := s.cacheFile.LoadRuleSet(s.tag); savedSet != nil {
 			err = s.loadBytes(savedSet.Content)
@@ -219,7 +216,7 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	}
 	response, err := s.httpClient.Do(request.WithContext(ctx))
 	if err != nil {
-		return E.Cause(err, "download via ", s.httpTransportDescription())
+		return err
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -267,67 +264,6 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	}
 	s.logger.Info("updated rule-set ", s.tag)
 	return nil
-}
-
-func (s *RemoteRuleSet) httpTransportDescription() string {
-	info := s.httpClientInfo
-	detour := info.Detour
-	outboundType := ""
-	if detour != "" {
-		if selectedOutbound, loaded := s.outbound.Outbound(detour); loaded {
-			outboundType = selectedOutbound.Type()
-		}
-	} else if info.DefaultOutbound {
-		if defaultOutbound := s.outbound.Default(); defaultOutbound != nil {
-			detour = defaultOutbound.Tag()
-			outboundType = defaultOutbound.Type()
-		}
-	}
-	return formatHTTPTransportDescription(info, detour, outboundType)
-}
-
-func formatHTTPTransportDescription(info adapter.HTTPTransportInfo, detour string, outboundType string) string {
-	clientTag := info.Tag
-	if clientTag == "" {
-		if info.DefaultOutbound {
-			clientTag = "implicit-default"
-		} else {
-			clientTag = "inline"
-		}
-	}
-	if detour == "" {
-		detour = "direct"
-	}
-	if outboundType == "" {
-		if info.Detour == "" && !info.DefaultOutbound {
-			outboundType = "direct"
-		} else {
-			outboundType = "unknown"
-		}
-	}
-	return F.ToString(
-		"http_client[", sanitizeDiagnosticValue(clientTag),
-		"] detour[", sanitizeDiagnosticValue(detour),
-		"] outbound_type[", sanitizeDiagnosticValue(outboundType),
-		"] engine[", sanitizeDiagnosticValue(info.Engine),
-		"] http_version[", info.Version,
-		"]",
-	)
-}
-
-func sanitizeDiagnosticValue(value string) string {
-	value = strings.Map(func(character rune) rune {
-		if unicode.IsControl(character) {
-			return ' '
-		}
-		return character
-	}, value)
-	const maxRunes = 256
-	valueRunes := []rune(value)
-	if len(valueRunes) > maxRunes {
-		value = string(valueRunes[:maxRunes])
-	}
-	return value
 }
 
 func (s *RemoteRuleSet) resolveTransport() (adapter.HTTPTransport, error) {

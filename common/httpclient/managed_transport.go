@@ -29,7 +29,6 @@ type ManagedTransport struct {
 	headers http.Header
 	host    string
 	tag     string
-	info    adapter.HTTPTransportInfo
 }
 
 type transportEpoch struct {
@@ -138,10 +137,6 @@ func (t *ManagedTransport) RoundTrip(request *http.Request) (*http.Response, err
 	return response, roundTripErr
 }
 
-func (t *ManagedTransport) Info() adapter.HTTPTransportInfo {
-	return t.info
-}
-
 func (t *ManagedTransport) CloseIdleConnections() {
 	oldEpoch := t.epoch.Swap(nil)
 	if oldEpoch == nil {
@@ -199,10 +194,6 @@ func (r *sharedRef) RoundTrip(request *http.Request) (*http.Response, error) {
 		r.shared.activeRefs.Add(1)
 	}
 	return r.managed.RoundTrip(request)
-}
-
-func (r *sharedRef) Info() adapter.HTTPTransportInfo {
-	return r.managed.Info()
 }
 
 func (r *sharedRef) CloseIdleConnections() {

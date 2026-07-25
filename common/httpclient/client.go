@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
@@ -34,7 +33,6 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 	headers.Del("Host")
 
 	var cheapRebuild bool
-	transportInfo := newHTTPTransportInfo(tag, options)
 	switch options.Engine {
 	case C.TLSEngineApple:
 		err = validateAppleTransport(ctx, options)
@@ -46,7 +44,6 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 			headers: headers,
 			host:    host,
 			tag:     tag,
-			info:    transportInfo,
 			factory: func() (innerTransport, error) {
 				return newAppleTransport(ctx, logger, rawDialer, options)
 			},
@@ -77,31 +74,12 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 		headers:      headers,
 		host:         host,
 		tag:          tag,
-		info:         transportInfo,
 		factory: func() (innerTransport, error) {
 			return newTransport(rawDialer, baseTLSConfig, options)
 		},
 	}
 	managedTransport.epoch.Store(&transportEpoch{transport: inner})
 	return managedTransport, nil
-}
-
-func newHTTPTransportInfo(tag string, options option.HTTPClientOptions) adapter.HTTPTransportInfo {
-	engine := options.Engine
-	if engine == "" {
-		engine = C.TLSEngineGo
-	}
-	version := options.Version
-	if version == 0 {
-		version = 2
-	}
-	return adapter.HTTPTransportInfo{
-		Tag:             tag,
-		Detour:          options.DialerOptions.Detour,
-		Engine:          engine,
-		Version:         version,
-		DefaultOutbound: options.DefaultOutbound,
-	}
 }
 
 func newTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.HTTPClientOptions) (innerTransport, error) {
