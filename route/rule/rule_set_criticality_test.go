@@ -109,8 +109,8 @@ func TestCriticalRuleSetTagsProxyAndBlockAreOptional(t *testing.T) {
 	}
 }
 
-// With a direct route.final there is no direct-to-proxy flip to protect against.
-func TestCriticalRuleSetTagsDirectFinalMakesNothingCritical(t *testing.T) {
+// With a direct route.final, a rule-set feeding a direct route has nothing to flip onto.
+func TestCriticalRuleSetTagsDirectRouteUnderDirectFinalIsOptional(t *testing.T) {
 	t.Parallel()
 	rules := []adapter.Rule{routeRuleOn([]string{"private_domain"}, "DIRECT")}
 	critical, known := CriticalRuleSetTags(rules, newCriticalityTestManager(C.TypeDirect))
@@ -119,6 +119,28 @@ func TestCriticalRuleSetTagsDirectFinalMakesNothingCritical(t *testing.T) {
 	}
 	if len(critical) != 0 {
 		t.Errorf("expected nothing critical with a direct final, got %v", critical)
+	}
+}
+
+// The whitelist shape: final is direct and the rule-set is what selects the proxy. Losing it sends
+// exactly the traffic the user wanted tunnelled out in the clear, so it must fail the start.
+func TestCriticalRuleSetTagsProxyRouteUnderDirectFinalIsCritical(t *testing.T) {
+	t.Parallel()
+	rules := []adapter.Rule{
+		routeRuleOn([]string{"proxy_domain"}, "PROXY"),
+		routeRuleOn([]string{"ads_block_domain"}, "REJECT"),
+		routeRuleOn([]string{"private_domain"}, "DIRECT"),
+	}
+	critical, known := CriticalRuleSetTags(rules, newCriticalityTestManager(C.TypeDirect))
+	if !known {
+		t.Fatal("criticality should be determinable")
+	}
+	if !critical["proxy_domain"] {
+		t.Errorf("expected proxy_domain to be critical under a direct final, got %v", critical)
+	}
+	// Blocking and direct routes still do not cross the boundary.
+	if len(critical) != 1 {
+		t.Errorf("unexpected critical set: %v", critical)
 	}
 }
 

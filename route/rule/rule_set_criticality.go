@@ -32,37 +32,52 @@ func (r *abstractLogicalRule) referencedRuleSetTags() []string {
 // config plainly did not intend, and which therefore must not be tolerated as empty.
 //
 // An empty rule-set never matches, so a rule built on it silently stops firing and its traffic falls
-// through to route.final. Where such a rule routes to a direct outbound and final is not direct,
-// losing the rule-set flips that traffic from direct onto the proxy — private-network and domestic
-// traffic would quietly start being tunnelled. Refusing to start is the better outcome there.
+// through to route.final. A rule-set is critical when that fall-through crosses the tunnel boundary
+// in either direction:
 //
-// Losing a rule-set that routes to another proxy only changes which proxy is used, and losing one
-// that routes to a block outbound only stops something from being blocked. Neither is worth
-// refusing to start over, so neither marks a rule-set critical.
+//   - final is a proxy and the rule routes direct: losing the rule-set starts tunnelling
+//     private-network and domestic traffic that was meant to stay off the proxy.
+//   - final is direct and the rule routes to a proxy: losing the rule-set sends traffic that was
+//     meant to be tunnelled out in the clear. This is the shape of a whitelist config, where only
+//     the listed destinations are proxied, and it is the more damaging of the two.
+//
+// Both directions have to be checked. Judging only the first would leave a whitelist config free to
+// start with an empty rule-set and quietly stop proxying anything it names.
+//
+// Losing a rule-set that routes to another proxy while final is also a proxy only changes which
+// proxy is used, and losing one that routes to a block outbound only stops something from being
+// blocked. Neither crosses the boundary, so neither marks a rule-set critical.
 //
 // DNS rules are not consulted: their target is a DNS server rather than an outbound, so the flip
 // this criterion detects does not apply. In practice the tags that matter (private and domestic
 // ranges) are referenced by route rules as well, so they are still covered.
 // The second return value is false when criticality could not be established at all. Callers must
 // then treat every rule-set as critical: tolerating one whose importance is unknown could silently
-// reroute direct traffic onto the proxy, which is exactly what this function exists to prevent.
+// move traffic across the tunnel boundary, which is exactly what this function exists to prevent.
 func CriticalRuleSetTags(rules []adapter.Rule, outboundManager adapter.OutboundManager) (map[string]bool, bool) {
 	critical := make(map[string]bool)
 	if outboundManager == nil {
 		return critical, false
 	}
+	// route.final is what the outbound manager reports as its default; it is the outbound every
+	// rule that stops matching falls through to.
 	final := outboundManager.Default()
 	if final == nil {
 		return critical, false
 	}
-	// If traffic already falls through to a direct outbound there is nothing to flip. route.final
-	// is what the outbound manager reports as its default.
-	if final.Type() == C.TypeDirect {
-		return critical, true
-	}
+	finalIsDirect := final.Type() == C.TypeDirect
 	for _, rule := range rules {
 		action, isRoute := rule.Action().(*RuleActionRoute)
-		if !isRoute || !isDirectOutbound(outboundManager, action.Outbound) {
+		if !isRoute {
+			continue
+		}
+		class, known := classifyOutbound(outboundManager, action.Outbound)
+		// An undeclared target routes nowhere, and a block target only stops something from being
+		// blocked; neither moves traffic across the tunnel boundary.
+		if !known || class == outboundClassBlock {
+			continue
+		}
+		if (class == outboundClassDirect) == finalIsDirect {
 			continue
 		}
 		referencer, isReferencer := rule.(ruleSetReferencer)
@@ -76,10 +91,30 @@ func CriticalRuleSetTags(rules []adapter.Rule, outboundManager adapter.OutboundM
 	return critical, true
 }
 
-func isDirectOutbound(outboundManager adapter.OutboundManager, tag string) bool {
+type outboundClass int
+
+const (
+	outboundClassDirect outboundClass = iota
+	outboundClassBlock
+	outboundClassProxy
+)
+
+// classifyOutbound reports which side of the tunnel boundary tag sits on. The second return value is
+// false for an empty or undeclared tag, which is neither side.
+func classifyOutbound(outboundManager adapter.OutboundManager, tag string) (outboundClass, bool) {
 	if tag == "" {
-		return false
+		return outboundClassProxy, false
 	}
 	outbound, loaded := outboundManager.Outbound(tag)
-	return loaded && outbound.Type() == C.TypeDirect
+	if !loaded {
+		return outboundClassProxy, false
+	}
+	switch outbound.Type() {
+	case C.TypeDirect:
+		return outboundClassDirect, true
+	case C.TypeBlock:
+		return outboundClassBlock, true
+	default:
+		return outboundClassProxy, true
+	}
 }
