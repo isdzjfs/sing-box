@@ -45,6 +45,19 @@ const ruleSetFetchTimeout = 20 * time.Second
 // working route. One rule-set therefore costs at most ruleSetFetchTimeout + this.
 const ruleSetFallbackBudget = 30 * time.Second
 
+// ruleSetMinFallbackTimeout floors the slice of the budget each fallback source gets. The budget is
+// split across the sources still to try so the whole mirror list is walked rather than exhausted by
+// the first one or two; the floor keeps a long list from cutting each attempt down to a window no
+// source could answer in. The parent context still caps the chain, so the floor cannot overrun it.
+const ruleSetMinFallbackTimeout = 5 * time.Second
+
+// RuleSetStartBudget bounds rule-set initialization as a whole. Each rule-set is already capped at
+// ruleSetFetchTimeout + ruleSetFallbackBudget, but that is per rule-set: at concurrency N a profile
+// with many rule-sets on a dead network still multiplies it by ceil(len/N). Nothing routes until
+// this phase finishes, so the phase itself needs a ceiling. Generous enough never to be reached on
+// a network that works at all.
+const RuleSetStartBudget = 3 * time.Minute
+
 // ruleSetRetryInterval is how soon a rule-set that has never loaded is tried again, instead of
 // waiting out its configured update interval. See RemoteRuleSet.nextUpdateDelay.
 const ruleSetRetryInterval = 10 * time.Minute
@@ -282,7 +295,7 @@ func (s *RemoteRuleSet) nextUpdateDelay() time.Duration {
 //
 // The error returned is always the configured source's, since that is the one the user can act on.
 func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
-	firstErr := s.fetchFrom(ctx, s.url, s.httpClient, isStart)
+	firstErr := s.fetchFrom(ctx, s.url, s.httpClient, isStart, ruleSetFetchTimeout)
 	if firstErr == nil {
 		return nil
 	}
@@ -305,9 +318,16 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	// minutes of startup during which there is no working route.
 	ctx, cancel := context.WithTimeout(ctx, ruleSetFallbackBudget)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
 	// ruleSetMirrorURLs returns a fresh slice, so appending the original URL cannot alias anything.
-	for _, fallbackURL := range append(ruleSetMirrorURLs(s.url), s.url) {
-		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart)
+	fallbackURLs := append(ruleSetMirrorURLs(s.url), s.url)
+	for i, fallbackURL := range fallbackURLs {
+		// Divide what is left of the budget among the sources still to try. A fixed per-attempt
+		// timeout larger than the average slice would let the first source or two spend the whole
+		// budget, so the mirrors listed after them — the ones that exist precisely because the
+		// earlier edges get blocked — would never be reached.
+		attemptTimeout := max(time.Until(deadline)/time.Duration(len(fallbackURLs)-i), ruleSetMinFallbackTimeout)
+		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart, attemptTimeout)
 		if err == nil {
 			return nil
 		}
@@ -344,9 +364,9 @@ func (s *RemoteRuleSet) resolveDirectClient() (*http.Client, error) {
 	return s.directClient, nil
 }
 
-func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client *http.Client, isStart bool) error {
+func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client *http.Client, isStart bool, timeout time.Duration) error {
 	s.logger.Debug("updating rule-set ", s.tag, " from URL: ", sourceURL)
-	ctx, cancel := context.WithTimeout(ctx, ruleSetFetchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, "GET", sourceURL, nil)
 	if err != nil {

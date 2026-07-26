@@ -145,10 +145,22 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			// When criticality cannot be established, every rule-set is treated as critical rather
 			// than tolerated, so an unknown importance can never silently reroute direct traffic.
 			criticalRuleSets, criticalityKnown := R.CriticalRuleSetTags(r.rules, r.outbound)
+			// One absolute deadline shared by every rule-set, bounding the phase rather than each
+			// rule-set on its own. Without fail-fast they no longer share a failure, so at
+			// concurrency 5 a profile with many rule-sets on a dead network runs ceil(len/5)
+			// sequential waves of per-rule-set worst case, and nothing routes for the whole of it.
+			//
+			// Applied per task, deliberately, rather than to the context handed to Run: task.Group
+			// returns the upstream context's error verbatim whenever that is what ended the run,
+			// which would fail the start on the deadline even when every rule-set that missed it
+			// was one the criticality check says is safe to continue without.
+			ruleSetStartDeadline := time.Now().Add(R.RuleSetStartBudget)
 			var ruleSetStartGroup task.Group
 			for i, ruleSet := range r.ruleSets {
 				ruleSetInPlace := ruleSet
 				ruleSetStartGroup.Append0(func(ctx context.Context) error {
+					ctx, cancel := context.WithDeadline(ctx, ruleSetStartDeadline)
+					defer cancel()
 					err := ruleSetInPlace.StartContext(ctx, startContext)
 					if err == nil {
 						return nil

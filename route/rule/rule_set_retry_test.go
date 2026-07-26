@@ -31,3 +31,20 @@ func TestNextUpdateDelayUsesConfiguredIntervalOnceLoaded(t *testing.T) {
 		t.Errorf("nextUpdateDelay() = %v, want %v", got, 24*time.Hour)
 	}
 }
+
+// The mirror list exists because individual edges get blocked, so the budget has to reach the ones
+// listed after the first. A fixed per-attempt timeout larger than the average slice would not.
+func TestFallbackBudgetCoversEveryMirror(t *testing.T) {
+	t.Parallel()
+	sources := len(ruleSetMirrorURLs("https://github.com/owner/repo/raw/main/rule.srs")) + 1
+	if sources < 2 {
+		t.Fatalf("expected several sources to divide the budget across, got %d", sources)
+	}
+	slice := ruleSetFallbackBudget / time.Duration(sources)
+	if slice < ruleSetMinFallbackTimeout {
+		t.Errorf(
+			"each of the %d sources gets %v, below the %v floor: the budget cannot walk the list",
+			sources, slice, ruleSetMinFallbackTimeout,
+		)
+	}
+}
