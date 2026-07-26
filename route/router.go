@@ -35,6 +35,7 @@ type Router struct {
 	network           adapter.NetworkManager
 	httpClientManager adapter.HTTPClientManager
 	rules             []adapter.Rule
+	dnsRuleSets       map[string]bool
 	needFindProcess   bool
 	needFindNeighbor  bool
 	leaseFiles        []string
@@ -62,6 +63,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		network:           service.FromContext[adapter.NetworkManager](ctx),
 		httpClientManager: service.FromContext[adapter.HTTPClientManager](ctx),
 		rules:             make([]adapter.Rule, 0, len(options.Rules)),
+		dnsRuleSets:       R.DNSRuleSetTags(dnsOptions.Rules),
 		ruleSetMap:        make(map[string]adapter.RuleSet),
 		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
 		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
@@ -145,6 +147,9 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			// When criticality cannot be established, every rule-set is treated as critical rather
 			// than tolerated, so an unknown importance can never silently reroute direct traffic.
 			criticalRuleSets, criticalityKnown := R.CriticalRuleSetTags(r.rules, r.outbound)
+			for tag := range r.dnsRuleSets {
+				criticalRuleSets[tag] = true
+			}
 			// One absolute deadline shared by every rule-set, bounding the phase rather than each
 			// rule-set on its own. Without fail-fast they no longer share a failure, so at
 			// concurrency 5 a profile with many rule-sets on a dead network runs ceil(len/5)

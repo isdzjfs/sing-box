@@ -81,6 +81,7 @@ type RemoteRuleSet struct {
 	lastEtag       string
 	lastEtagURL    string
 	directAccess   sync.Mutex
+	mirrorClient   *http.Client
 	directClient   *http.Client
 	cacheFile      adapter.CacheFile
 	pauseManager   pause.Manager
@@ -109,7 +110,6 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 		logger:         logger,
 		tag:            tag,
 		url:            url,
-		cacheKey:       ruleSetCacheKey(options.Format, url),
 		initialPath:    initialPath,
 		options:        options,
 		updateInterval: updateInterval,
@@ -118,11 +118,12 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 }
 
 // ruleSetCacheKey addresses a cached rule-set by what it points at rather than by its tag. Two
-// profiles that reference the same URL then share one cached payload, and two profiles that reuse
-// one tag for different URLs never read each other's. Format participates because the same bytes
-// are parsed differently under source and binary.
-func ruleSetCacheKey(format string, url string) string {
-	hash := sha256.Sum256([]byte(format + "\x00" + url))
+// profiles that reference the same URL with the same effective HTTP semantics then share one
+// cached payload, and clients that use different headers, TLS, or egress settings never reuse each
+// other's bytes or ETag. Format participates because the same bytes are parsed differently under
+// source and binary.
+func ruleSetCacheKey(format string, url string, transportIdentity string) string {
+	hash := sha256.Sum256([]byte(format + "\x00" + url + "\x00" + transportIdentity))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -141,6 +142,11 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 		return E.Cause(err, "create rule-set http client")
 	}
 	startContext.Register(transport)
+	if identityTransport, loaded := transport.(interface{ CacheIdentity() string }); loaded {
+		s.cacheKey = ruleSetCacheKey(s.options.Format, s.url, identityTransport.CacheIdentity())
+	} else {
+		s.cacheKey = ruleSetCacheKey(s.options.Format, s.url, "")
+	}
 	s.httpClient = &http.Client{Transport: transport}
 	if s.cacheFile != nil {
 		if savedSet := s.cacheFile.LoadRuleSet(s.cacheKey); savedSet != nil {
@@ -304,14 +310,20 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 		return firstErr
 	}
 	// Only once the configured source has actually failed is a direct transport worth building.
-	directClient, err := s.resolveDirectClient()
+	mirrorClient, err := s.resolveDirectClient(false)
 	if err != nil {
 		s.logger.Debug("rule-set ", s.tag, " has no direct fallback: ", err)
+		return firstErr
+	}
+	directClient, err := s.resolveDirectClient(true)
+	if err != nil {
+		s.logger.Debug("rule-set ", s.tag, " has no origin-preserving direct fallback: ", err)
 		return firstErr
 	}
 	// The direct transport is not registered with the start context, so nothing else will ever drop
 	// its keep-alive connections. Release them here instead of holding a descriptor per fallback
 	// source for the lifetime of the process.
+	defer mirrorClient.CloseIdleConnections()
 	defer directClient.CloseIdleConnections()
 	// Bound the whole chain rather than each attempt: with fail-fast removed, every rule-set now
 	// runs its fallbacks, and a per-attempt timeout alone would let one slow network multiply into
@@ -319,15 +331,21 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	ctx, cancel := context.WithTimeout(ctx, ruleSetFallbackBudget)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	// ruleSetMirrorURLs returns a fresh slice, so appending the original URL cannot alias anything.
-	fallbackURLs := append(ruleSetMirrorURLs(s.url), s.url)
+	mirrorURLs := ruleSetMirrorURLs(s.url)
+	fallbackURLs := append(append([]string{}, mirrorURLs...), s.url)
 	for i, fallbackURL := range fallbackURLs {
 		// Divide what is left of the budget among the sources still to try. A fixed per-attempt
 		// timeout larger than the average slice would let the first source or two spend the whole
 		// budget, so the mirrors listed after them — the ones that exist precisely because the
 		// earlier edges get blocked — would never be reached.
 		attemptTimeout := max(time.Until(deadline)/time.Duration(len(fallbackURLs)-i), ruleSetMinFallbackTimeout)
-		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart, attemptTimeout)
+		fallbackClient := mirrorClient
+		if i == len(fallbackURLs)-1 {
+			// Never send origin-specific headers (Authorization in particular) to a public mirror.
+			// The original URL, however, still needs its configured headers and TLS settings.
+			fallbackClient = directClient
+		}
+		err = s.fetchFrom(ctx, fallbackURL, fallbackClient, isStart, attemptTimeout)
 		if err == nil {
 			// Info, not Debug: the content came from somewhere other than what the config names,
 			// over a connection that left the tunnel. That should not be silent.
@@ -349,22 +367,42 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 // The transport is shared rather than built per rule-set: building one each would leave a tracked
 // transport alive per failing rule-set until shutdown. Each rule-set still holds its own reference,
 // so the CloseIdleConnections in fetch only takes effect once the last holder is done.
-func (s *RemoteRuleSet) resolveDirectClient() (*http.Client, error) {
+func (s *RemoteRuleSet) resolveDirectClient(preserveOriginOptions bool) (*http.Client, error) {
 	s.directAccess.Lock()
 	defer s.directAccess.Unlock()
-	if s.directClient != nil {
+	if preserveOriginOptions && s.directClient != nil {
 		return s.directClient, nil
+	}
+	if !preserveOriginOptions && s.mirrorClient != nil {
+		return s.mirrorClient, nil
 	}
 	httpClientManager := service.FromContext[adapter.HTTPClientManager](s.ctx)
 	if httpClientManager == nil {
 		return nil, E.New("missing http client manager")
 	}
-	transport, err := httpClientManager.DirectTransport()
+	var clientOptions *option.HTTPClientOptions
+	if preserveOriginOptions {
+		clientOptions = s.options.RemoteOptions.HTTPClient
+		if (clientOptions == nil || clientOptions.IsEmpty()) && s.options.RemoteOptions.DownloadDetour != "" { //nolint:staticcheck
+			clientOptions = &option.HTTPClientOptions{
+				DialerOptions: option.DialerOptions{
+					Detour: s.options.RemoteOptions.DownloadDetour, //nolint:staticcheck
+				},
+				DisableEmptyDirectCheck: true,
+			}
+		}
+	}
+	transport, err := httpClientManager.DirectTransport(clientOptions, preserveOriginOptions)
 	if err != nil {
 		return nil, err
 	}
-	s.directClient = &http.Client{Transport: transport}
-	return s.directClient, nil
+	client := &http.Client{Transport: transport}
+	if preserveOriginOptions {
+		s.directClient = client
+	} else {
+		s.mirrorClient = client
+	}
+	return client, nil
 }
 
 func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client *http.Client, isStart bool, timeout time.Duration) error {

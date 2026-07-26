@@ -327,9 +327,10 @@ func (c *CacheFile) createBucket(t *bbolt.Tx, key []byte) (*bbolt.Bucket, error)
 	return bucket.CreateBucketIfNotExists(key)
 }
 
-// sharedBucket ignores cacheID. Rule-set payloads are addressed by their source URL, so the same
-// URL always yields the same content regardless of which profile references it. Namespacing them
-// per cacheID would force every new profile to re-download rule-sets another profile already has.
+// sharedBucket ignores cacheID. Rule-set payloads are addressed by their source URL plus effective
+// HTTP transport identity, so profiles can reuse content only when both the source and request
+// semantics match. Namespacing them per cacheID would force every new profile to re-download
+// rule-sets another profile already has.
 func (c *CacheFile) sharedBucket(t *bbolt.Tx, key []byte) *bbolt.Bucket {
 	return t.Bucket(key)
 }
@@ -401,7 +402,8 @@ func (c *CacheFile) StoreGroupExpand(group string, isExpand bool) error {
 }
 
 // LoadRuleSet and SaveRuleSet are keyed by the caller-supplied content key (derived from the
-// rule-set source URL), not by tag, and live in a bucket shared by every cacheID.
+// rule-set source URL and HTTP transport identity), not by tag, and live in a bucket shared by
+// every cacheID.
 func (c *CacheFile) LoadRuleSet(key string) *adapter.SavedBinary {
 	var savedSet adapter.SavedBinary
 	err := c.view(func(t *bbolt.Tx) error {

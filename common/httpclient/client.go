@@ -2,6 +2,9 @@ package httpclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strconv"
 	"time"
 
 	"github.com/sagernet/sing-box/common/dialer"
@@ -10,11 +13,13 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/logger"
 	N "github.com/sagernet/sing/common/network"
 )
 
 func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, options option.HTTPClientOptions) (*ManagedTransport, error) {
+	cacheIdentity := transportCacheIdentity(options)
 	rawDialer, err := dialer.NewWithOptions(dialer.Options{
 		Context:                 ctx,
 		Options:                 options.DialerOptions,
@@ -40,10 +45,11 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 			return nil, err
 		}
 		return &ManagedTransport{
-			dialer:  rawDialer,
-			headers: headers,
-			host:    host,
-			tag:     tag,
+			dialer:        rawDialer,
+			headers:       headers,
+			host:          host,
+			tag:           tag,
+			cacheIdentity: cacheIdentity,
 			factory: func() (innerTransport, error) {
 				return newAppleTransport(ctx, logger, rawDialer, options)
 			},
@@ -69,17 +75,33 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 		return nil, err
 	}
 	managedTransport := &ManagedTransport{
-		cheapRebuild: cheapRebuild,
-		dialer:       rawDialer,
-		headers:      headers,
-		host:         host,
-		tag:          tag,
+		cheapRebuild:  cheapRebuild,
+		dialer:        rawDialer,
+		headers:       headers,
+		host:          host,
+		tag:           tag,
+		cacheIdentity: cacheIdentity,
 		factory: func() (innerTransport, error) {
 			return newTransport(rawDialer, baseTLSConfig, options)
 		},
 	}
 	managedTransport.epoch.Store(&transportEpoch{transport: inner})
 	return managedTransport, nil
+}
+
+// transportCacheIdentity fingerprints the effective HTTP request and egress semantics without
+// exposing sensitive headers in cache keys or logs.
+func transportCacheIdentity(options option.HTTPClientOptions) string {
+	content, err := json.Marshal(options)
+	if err != nil {
+		return ""
+	}
+	content = strconv.AppendBool(append(content, 0), options.DefaultOutbound)
+	content = strconv.AppendBool(append(content, 0), options.DisableEmptyDirectCheck)
+	content = strconv.AppendBool(append(content, 0), options.ResolveOnDetour)
+	content = strconv.AppendBool(append(content, 0), options.DirectResolver)
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
 }
 
 func newTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.HTTPClientOptions) (innerTransport, error) {

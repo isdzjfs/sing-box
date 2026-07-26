@@ -18,10 +18,10 @@ type HTTPTransport interface {
 type HTTPClientManager interface {
 	ResolveTransport(ctx context.Context, logger logger.ContextLogger, options option.HTTPClientOptions) (HTTPTransport, error)
 	DefaultTransport() HTTPTransport
-	// DirectTransport returns a reference to one shared detour-free transport, created on first
-	// use. Callers that need a connection outside the tunnel — rule-set fallbacks, most visibly —
-	// would otherwise each get a transport of their own that stays tracked until shutdown.
-	DirectTransport() (HTTPTransport, error)
+	// DirectTransport returns a shared detour-free transport. When preserveDefault is true, empty
+	// options inherit the configured default HTTP client's request semantics. Routing-related
+	// dialer fields are always removed, while headers, TLS, and HTTP version settings are retained.
+	DirectTransport(options *option.HTTPClientOptions, preserveDefault bool) (HTTPTransport, error)
 	ResetNetwork()
 }
 

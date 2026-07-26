@@ -25,7 +25,7 @@ type Manager struct {
 	managedTransports        []*ManagedTransport
 	defaultTag               string
 	defaultTransport         *sharedManagedTransport
-	directTransport          *sharedManagedTransport
+	directTransports         map[string]*sharedManagedTransport
 	defaultTransportFallback func() (*ManagedTransport, error)
 }
 
@@ -48,6 +48,7 @@ func NewManager(ctx context.Context, logger log.ContextLogger, clients []option.
 		logger:           logger,
 		defines:          defines,
 		sharedTransports: make(map[string]*sharedManagedTransport),
+		directTransports: make(map[string]*sharedManagedTransport),
 		defaultTag:       defaultTag,
 	}
 }
@@ -95,26 +96,59 @@ func (m *Manager) DefaultTransport() adapter.HTTPTransport {
 	return newSharedRef(m.defaultTransport.managed, m.defaultTransport.shared)
 }
 
-// DirectTransport hands out references to a single detour-free transport. ResolveTransport with
-// empty options would build and track a fresh one on every call, which for rule-set fallbacks means
-// one transport per rule-set that could not reach its configured source, each alive until Close.
-// Sharing also means CloseIdleConnections by one holder does not drop another holder's connections:
-// the shared reference only forwards it once the last active holder has released.
-func (m *Manager) DirectTransport() (adapter.HTTPTransport, error) {
+// DirectTransport shares transports by their effective request semantics. Routing fields are
+// stripped so the connection is genuinely direct, while an origin fallback can retain headers,
+// TLS, and protocol settings from the configured client.
+func (m *Manager) DirectTransport(options *option.HTTPClientOptions, preserveDefault bool) (adapter.HTTPTransport, error) {
 	m.access.Lock()
 	defer m.access.Unlock()
-	if m.directTransport == nil {
-		transport, err := NewTransport(m.ctx, m.logger, "", option.HTTPClientOptions{})
-		if err != nil {
-			return nil, E.Cause(err, "create direct http client")
-		}
-		m.directTransport = &sharedManagedTransport{
-			managed: transport,
-			shared:  &sharedState{},
-		}
-		m.managedTransports = append(m.managedTransports, transport)
+	directOptions, err := m.resolveDirectOptions(options, preserveDefault)
+	if err != nil {
+		return nil, err
 	}
-	return newSharedRef(m.directTransport.managed, m.directTransport.shared), nil
+	identity := transportCacheIdentity(directOptions)
+	if sharedTransport, loaded := m.directTransports[identity]; loaded {
+		return newSharedRef(sharedTransport.managed, sharedTransport.shared), nil
+	}
+	transport, err := NewTransport(m.ctx, m.logger, "", directOptions)
+	if err != nil {
+		return nil, E.Cause(err, "create direct http client")
+	}
+	sharedTransport := &sharedManagedTransport{
+		managed: transport,
+		shared:  &sharedState{},
+	}
+	m.directTransports[identity] = sharedTransport
+	m.managedTransports = append(m.managedTransports, transport)
+	return newSharedRef(sharedTransport.managed, sharedTransport.shared), nil
+}
+
+func (m *Manager) resolveDirectOptions(options *option.HTTPClientOptions, preserveDefault bool) (option.HTTPClientOptions, error) {
+	var resolved option.HTTPClientOptions
+	if options != nil && !options.IsEmpty() {
+		if options.Tag != "" {
+			define, loaded := m.defines[options.Tag]
+			if !loaded {
+				return option.HTTPClientOptions{}, E.New("http_client not found: ", options.Tag)
+			}
+			resolved = define.Options()
+		} else {
+			resolved = *options
+		}
+	} else if preserveDefault && m.defaultTag != "" {
+		define, loaded := m.defines[m.defaultTag]
+		if !loaded {
+			return option.HTTPClientOptions{}, E.New("http_client not found: ", m.defaultTag)
+		}
+		resolved = define.Options()
+	}
+	resolved.Tag = ""
+	resolved.DialerOptions = option.DialerOptions{}
+	resolved.DefaultOutbound = false
+	resolved.DisableEmptyDirectCheck = false
+	resolved.ResolveOnDetour = false
+	resolved.DirectResolver = false
+	return resolved, nil
 }
 
 func (m *Manager) ResolveTransport(ctx context.Context, logger logger.ContextLogger, options option.HTTPClientOptions) (adapter.HTTPTransport, error) {
@@ -198,6 +232,6 @@ func (m *Manager) Close() error {
 	}
 	m.managedTransports = nil
 	m.sharedTransports = nil
-	m.directTransport = nil
+	m.directTransports = nil
 	return err
 }

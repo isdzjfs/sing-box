@@ -3,6 +3,7 @@ package rule
 import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 )
 
 // ruleSetReferencer is satisfied by every concrete rule type, because they all embed either
@@ -48,9 +49,6 @@ func (r *abstractLogicalRule) referencedRuleSetTags() []string {
 // proxy is used, and losing one that routes to a block outbound only stops something from being
 // blocked. Neither crosses the boundary, so neither marks a rule-set critical.
 //
-// DNS rules are not consulted: their target is a DNS server rather than an outbound, so the flip
-// this criterion detects does not apply. In practice the tags that matter (private and domestic
-// ranges) are referenced by route rules as well, so they are still covered.
 // The second return value is false when criticality could not be established at all. Callers must
 // then treat every rule-set as critical: tolerating one whose importance is unknown could silently
 // move traffic across the tunnel boundary, which is exactly what this function exists to prevent.
@@ -65,16 +63,25 @@ func CriticalRuleSetTags(rules []adapter.Rule, outboundManager adapter.OutboundM
 	if final == nil {
 		return critical, false
 	}
-	finalIsDirect := final.Type() == C.TypeDirect
+	finalClass, finalKnown := classifyOutboundInstance(outboundManager, final, make(map[string]bool))
+	if !finalKnown || finalClass == outboundClassBlock {
+		return critical, false
+	}
+	finalIsDirect := finalClass == outboundClassDirect
 	for _, rule := range rules {
 		action, isRoute := rule.Action().(*RuleActionRoute)
 		if !isRoute {
 			continue
 		}
 		class, known := classifyOutbound(outboundManager, action.Outbound)
-		// An undeclared target routes nowhere, and a block target only stops something from being
-		// blocked; neither moves traffic across the tunnel boundary.
-		if !known || class == outboundClassBlock {
+		if !known {
+			// Invalid, not-yet-selected, or cyclic groups cannot be assumed to stay on either side
+			// of the tunnel boundary. Fail closed for the whole set of rule-sets.
+			return critical, false
+		}
+		// A block target only stops something from being blocked; it does not move traffic across
+		// the tunnel boundary.
+		if class == outboundClassBlock {
 			continue
 		}
 		if (class == outboundClassDirect) == finalIsDirect {
@@ -89,6 +96,30 @@ func CriticalRuleSetTags(rules []adapter.Rule, outboundManager adapter.OutboundM
 		}
 	}
 	return critical, true
+}
+
+// DNSRuleSetTags returns every rule-set referenced by DNS matching. An empty DNS rule-set changes
+// which server receives a query and can leak names to the default resolver, so these references are
+// always critical rather than being classified through the outbound tunnel boundary.
+func DNSRuleSetTags(rules []option.DNSRule) map[string]bool {
+	tags := make(map[string]bool)
+	var collect func(rule option.DNSRule)
+	collect = func(rule option.DNSRule) {
+		switch rule.Type {
+		case "", C.RuleTypeDefault:
+			for _, tag := range rule.DefaultOptions.RuleSet {
+				tags[tag] = true
+			}
+		case C.RuleTypeLogical:
+			for _, nestedRule := range rule.LogicalOptions.Rules {
+				collect(nestedRule)
+			}
+		}
+	}
+	for _, rule := range rules {
+		collect(rule)
+	}
+	return tags
 }
 
 type outboundClass int
@@ -108,6 +139,32 @@ func classifyOutbound(outboundManager adapter.OutboundManager, tag string) (outb
 	outbound, loaded := outboundManager.Outbound(tag)
 	if !loaded {
 		return outboundClassProxy, false
+	}
+	return classifyOutboundInstance(outboundManager, outbound, make(map[string]bool))
+}
+
+func classifyOutboundInstance(
+	outboundManager adapter.OutboundManager,
+	outbound adapter.Outbound,
+	visited map[string]bool,
+) (outboundClass, bool) {
+	if group, isGroup := outbound.(adapter.OutboundGroup); isGroup {
+		tag := outbound.Tag()
+		if tag != "" {
+			if visited[tag] {
+				return outboundClassProxy, false
+			}
+			visited[tag] = true
+		}
+		selectedTag := group.Now()
+		if selectedTag == "" {
+			return outboundClassProxy, false
+		}
+		selected, loaded := outboundManager.Outbound(selectedTag)
+		if !loaded {
+			return outboundClassProxy, false
+		}
+		return classifyOutboundInstance(outboundManager, selected, visited)
 	}
 	switch outbound.Type() {
 	case C.TypeDirect:

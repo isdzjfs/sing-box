@@ -8,6 +8,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -28,6 +29,15 @@ func (o *criticalityTestOutbound) DialContext(context.Context, string, M.Socksad
 func (o *criticalityTestOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, nil
 }
+
+type criticalityTestOutboundGroup struct {
+	criticalityTestOutbound
+	selected string
+	all      []string
+}
+
+func (o *criticalityTestOutboundGroup) Now() string   { return o.selected }
+func (o *criticalityTestOutboundGroup) All() []string { return o.all }
 
 type criticalityTestOutboundManager struct {
 	outbounds map[string]adapter.Outbound
@@ -98,7 +108,6 @@ func TestCriticalRuleSetTagsProxyAndBlockAreOptional(t *testing.T) {
 	rules := []adapter.Rule{
 		routeRuleOn([]string{"youtube_domain"}, "PROXY"),
 		routeRuleOn([]string{"ads_block_domain"}, "REJECT"),
-		routeRuleOn([]string{"unknown_target"}, "NOT_DECLARED"),
 	}
 	critical, known := CriticalRuleSetTags(rules, newCriticalityTestManager(C.TypeSelector))
 	if !known {
@@ -106,6 +115,105 @@ func TestCriticalRuleSetTagsProxyAndBlockAreOptional(t *testing.T) {
 	}
 	if len(critical) != 0 {
 		t.Errorf("expected nothing critical, got %v", critical)
+	}
+}
+
+func TestCriticalRuleSetTagsSelectorUsesSelectedOutbound(t *testing.T) {
+	t.Parallel()
+	manager := newCriticalityTestManager(C.TypeDirect)
+	manager.outbounds["SELECTOR"] = &criticalityTestOutboundGroup{
+		criticalityTestOutbound: criticalityTestOutbound{
+			tag:          "SELECTOR",
+			outboundType: C.TypeSelector,
+		},
+		selected: "PROXY",
+		all:      []string{"DIRECT", "PROXY"},
+	}
+	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "SELECTOR")}
+	critical, known := CriticalRuleSetTags(rules, manager)
+	if !known {
+		t.Fatal("selected selector outbound should be determinable")
+	}
+	if !critical["proxy_domain"] {
+		t.Fatalf("selector currently using a proxy must cross a direct final: %v", critical)
+	}
+
+	manager.outbounds["SELECTOR"].(*criticalityTestOutboundGroup).selected = "DIRECT"
+	critical, known = CriticalRuleSetTags(rules, manager)
+	if !known {
+		t.Fatal("selector currently using direct should be determinable")
+	}
+	if len(critical) != 0 {
+		t.Fatalf("selector currently using direct must match a direct final: %v", critical)
+	}
+}
+
+func TestCriticalRuleSetTagsUnresolvedGroupIsUndetermined(t *testing.T) {
+	t.Parallel()
+	manager := newCriticalityTestManager(C.TypeDirect)
+	manager.outbounds["SELECTOR"] = &criticalityTestOutboundGroup{
+		criticalityTestOutbound: criticalityTestOutbound{
+			tag:          "SELECTOR",
+			outboundType: C.TypeSelector,
+		},
+		all: []string{"DIRECT", "PROXY"},
+	}
+	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "SELECTOR")}
+	if _, known := CriticalRuleSetTags(rules, manager); known {
+		t.Fatal("a group without a selected outbound must fail closed")
+	}
+}
+
+func TestCriticalRuleSetTagsCyclicGroupIsUndetermined(t *testing.T) {
+	t.Parallel()
+	manager := newCriticalityTestManager(C.TypeDirect)
+	manager.outbounds["A"] = &criticalityTestOutboundGroup{
+		criticalityTestOutbound: criticalityTestOutbound{tag: "A", outboundType: C.TypeSelector},
+		selected:                "B",
+		all:                     []string{"B"},
+	}
+	manager.outbounds["B"] = &criticalityTestOutboundGroup{
+		criticalityTestOutbound: criticalityTestOutbound{tag: "B", outboundType: C.TypeSelector},
+		selected:                "A",
+		all:                     []string{"A"},
+	}
+	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "A")}
+	if _, known := CriticalRuleSetTags(rules, manager); known {
+		t.Fatal("cyclic groups must fail closed")
+	}
+}
+
+func TestDNSRuleSetTagsIncludesNestedRules(t *testing.T) {
+	t.Parallel()
+	rules := []option.DNSRule{
+		{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultDNSRule{
+				RawDefaultDNSRule: option.RawDefaultDNSRule{RuleSet: []string{"dns_direct"}},
+			},
+		},
+		{
+			Type: C.RuleTypeLogical,
+			LogicalOptions: option.LogicalDNSRule{
+				RawLogicalDNSRule: option.RawLogicalDNSRule{
+					Rules: []option.DNSRule{{
+						Type: C.RuleTypeDefault,
+						DefaultOptions: option.DefaultDNSRule{
+							RawDefaultDNSRule: option.RawDefaultDNSRule{RuleSet: []string{"dns_proxy"}},
+						},
+					}},
+				},
+			},
+		},
+	}
+	tags := DNSRuleSetTags(rules)
+	for _, tag := range []string{"dns_direct", "dns_proxy"} {
+		if !tags[tag] {
+			t.Fatalf("expected DNS rule-set %s to be critical: %v", tag, tags)
+		}
+	}
+	if len(tags) != 2 {
+		t.Fatalf("unexpected DNS rule-set tags: %v", tags)
 	}
 }
 

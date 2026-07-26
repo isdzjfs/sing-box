@@ -25,10 +25,11 @@ type ManagedTransport struct {
 	factory       func() (innerTransport, error)
 	cheapRebuild  bool
 
-	dialer  N.Dialer
-	headers http.Header
-	host    string
-	tag     string
+	dialer        N.Dialer
+	headers       http.Header
+	host          string
+	tag           string
+	cacheIdentity string
 }
 
 type transportEpoch struct {
@@ -137,6 +138,10 @@ func (t *ManagedTransport) RoundTrip(request *http.Request) (*http.Response, err
 	return response, roundTripErr
 }
 
+func (t *ManagedTransport) CacheIdentity() string {
+	return t.cacheIdentity
+}
+
 func (t *ManagedTransport) CloseIdleConnections() {
 	oldEpoch := t.epoch.Swap(nil)
 	if oldEpoch == nil {
@@ -206,4 +211,8 @@ func (r *sharedRef) CloseIdleConnections() {
 
 func (r *sharedRef) Reset() {
 	r.managed.Reset()
+}
+
+func (r *sharedRef) CacheIdentity() string {
+	return r.managed.CacheIdentity()
 }
