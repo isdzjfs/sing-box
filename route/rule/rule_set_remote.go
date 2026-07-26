@@ -329,6 +329,9 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 		attemptTimeout := max(time.Until(deadline)/time.Duration(len(fallbackURLs)-i), ruleSetMinFallbackTimeout)
 		err = s.fetchFrom(ctx, fallbackURL, directClient, isStart, attemptTimeout)
 		if err == nil {
+			// Info, not Debug: the content came from somewhere other than what the config names,
+			// over a connection that left the tunnel. That should not be silent.
+			s.logger.Info("rule-set ", s.tag, " loaded from fallback source ", fallbackURL)
 			return nil
 		}
 		s.logger.Debug("rule-set ", s.tag, " fallback source ", fallbackURL, " failed: ", err)
