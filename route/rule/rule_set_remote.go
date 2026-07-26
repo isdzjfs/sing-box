@@ -412,9 +412,12 @@ func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client 
 	if err != nil {
 		return err
 	}
-	eTagHeader := response.Header.Get("Etag")
-	if eTagHeader != "" {
-		s.lastEtag = eTagHeader
+	// Assign both unconditionally. A 200 without an ETag has to clear whatever was held: leaving a
+	// previous source's tag in place would pair it with this response's content in the cache, and a
+	// later If-None-Match could then answer 304 for bytes that are no longer what that tag names.
+	s.lastEtag = response.Header.Get("Etag")
+	s.lastEtagURL = ""
+	if s.lastEtag != "" {
 		s.lastEtagURL = sourceURL
 	}
 	s.lastUpdated = time.Now()
