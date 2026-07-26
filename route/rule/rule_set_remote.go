@@ -45,6 +45,10 @@ const ruleSetFetchTimeout = 20 * time.Second
 // working route. One rule-set therefore costs at most ruleSetFetchTimeout + this.
 const ruleSetFallbackBudget = 30 * time.Second
 
+// ruleSetRetryInterval is how soon a rule-set that has never loaded is tried again, instead of
+// waiting out its configured update interval. See RemoteRuleSet.nextUpdateDelay.
+const ruleSetRetryInterval = 10 * time.Minute
+
 type RemoteRuleSet struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -252,6 +256,22 @@ func (s *RemoteRuleSet) updateOnce() {
 	} else if s.refs.Load() == 0 {
 		s.rules = nil
 	}
+}
+
+// nextUpdateDelay reports how long to wait before touching this rule-set again.
+//
+// A rule-set that has never loaded is empty, so every rule built on it is silently not matching and
+// its traffic is falling through to route.final. Since initialization no longer fails on that, the
+// only thing that repairs it is another fetch — waiting out the configured interval, a day by
+// default, would leave routing degraded for that whole time over what is usually a transient
+// network failure at boot. Deliberately a flat retry rather than a backoff: the cost of an attempt
+// is one request that fails fast when the network is still down, and a backoff would only push the
+// recovery back towards the interval it exists to avoid.
+func (s *RemoteRuleSet) nextUpdateDelay() time.Duration {
+	if s.lastUpdated.IsZero() {
+		return min(ruleSetRetryInterval, s.updateInterval)
+	}
+	return s.updateInterval
 }
 
 // fetch tries the configured source first and, only if that fails, falls back: known mirrors of the

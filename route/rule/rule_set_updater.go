@@ -62,7 +62,9 @@ func (u *RuleSetUpdater) loopUpdate() {
 				continue
 			}
 			ruleSet.updateOnce()
-			nextUpdates[i] = now.Add(ruleSet.updateInterval)
+			// Asked after the attempt, so a rule-set that is still empty gets the short retry and
+			// one that just succeeded goes back to its configured interval.
+			nextUpdates[i] = now.Add(ruleSet.nextUpdateDelay())
 			updated = true
 		}
 		if updated {
