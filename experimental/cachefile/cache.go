@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/netip"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/service/filemanager"
@@ -207,23 +205,11 @@ func (c *CacheFile) start() error {
 		return E.Cause(err, "platform chown")
 	}
 	err = db.Batch(func(tx *bbolt.Tx) error {
-		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
-			if name[0] == 0 {
-				return b.ForEachBucket(func(k []byte) error {
-					bucketName := string(k)
-					if !(common.Contains(bucketNameList, bucketName)) {
-						_ = b.DeleteBucket(name)
-					}
-					return nil
-				})
-			} else {
-				bucketName := string(name)
-				if !(common.Contains(bucketNameList, bucketName) || strings.HasPrefix(bucketName, fakeipBucketPrefix)) {
-					_ = tx.DeleteBucket(name)
-				}
-			}
-			return nil
-		})
+		err := sweepUnknownBuckets(tx)
+		if err != nil {
+			return err
+		}
+		return sweepLegacyRuleSetCache(tx)
 	})
 	if err != nil {
 		db.Close()
