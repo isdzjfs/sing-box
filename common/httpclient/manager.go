@@ -25,6 +25,7 @@ type Manager struct {
 	managedTransports        []*ManagedTransport
 	defaultTag               string
 	defaultTransport         *sharedManagedTransport
+	directTransport          *sharedManagedTransport
 	defaultTransportFallback func() (*ManagedTransport, error)
 }
 
@@ -92,6 +93,28 @@ func (m *Manager) DefaultTransport() adapter.HTTPTransport {
 		return nil
 	}
 	return newSharedRef(m.defaultTransport.managed, m.defaultTransport.shared)
+}
+
+// DirectTransport hands out references to a single detour-free transport. ResolveTransport with
+// empty options would build and track a fresh one on every call, which for rule-set fallbacks means
+// one transport per rule-set that could not reach its configured source, each alive until Close.
+// Sharing also means CloseIdleConnections by one holder does not drop another holder's connections:
+// the shared reference only forwards it once the last active holder has released.
+func (m *Manager) DirectTransport() (adapter.HTTPTransport, error) {
+	m.access.Lock()
+	defer m.access.Unlock()
+	if m.directTransport == nil {
+		transport, err := NewTransport(m.ctx, m.logger, "", option.HTTPClientOptions{})
+		if err != nil {
+			return nil, E.Cause(err, "create direct http client")
+		}
+		m.directTransport = &sharedManagedTransport{
+			managed: transport,
+			shared:  &sharedState{},
+		}
+		m.managedTransports = append(m.managedTransports, transport)
+	}
+	return newSharedRef(m.directTransport.managed, m.directTransport.shared), nil
 }
 
 func (m *Manager) ResolveTransport(ctx context.Context, logger logger.ContextLogger, options option.HTTPClientOptions) (adapter.HTTPTransport, error) {
@@ -175,5 +198,6 @@ func (m *Manager) Close() error {
 	}
 	m.managedTransports = nil
 	m.sharedTransports = nil
+	m.directTransport = nil
 	return err
 }

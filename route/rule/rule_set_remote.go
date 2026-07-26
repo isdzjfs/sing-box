@@ -299,9 +299,13 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	return firstErr
 }
 
-// resolveDirectClient builds a detour-free transport, created on first use so that rule-sets whose
-// configured source works never pay for one. On Android this dials through the platform interface's
-// protected socket, so it genuinely leaves the tunnel.
+// resolveDirectClient takes a reference to the manager's shared detour-free transport, on first use
+// so that rule-sets whose configured source works never pay for one. On Android this dials through
+// the platform interface's protected socket, so it genuinely leaves the tunnel.
+//
+// The transport is shared rather than built per rule-set: building one each would leave a tracked
+// transport alive per failing rule-set until shutdown. Each rule-set still holds its own reference,
+// so the CloseIdleConnections in fetch only takes effect once the last holder is done.
 func (s *RemoteRuleSet) resolveDirectClient() (*http.Client, error) {
 	s.directAccess.Lock()
 	defer s.directAccess.Unlock()
@@ -312,7 +316,7 @@ func (s *RemoteRuleSet) resolveDirectClient() (*http.Client, error) {
 	if httpClientManager == nil {
 		return nil, E.New("missing http client manager")
 	}
-	transport, err := httpClientManager.ResolveTransport(s.ctx, s.logger, option.HTTPClientOptions{})
+	transport, err := httpClientManager.DirectTransport()
 	if err != nil {
 		return nil, err
 	}
