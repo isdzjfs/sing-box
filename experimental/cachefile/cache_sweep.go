@@ -2,14 +2,19 @@ package cachefile
 
 import (
 	"bytes"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/sagernet/bbolt"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/rulesetcache"
 	"github.com/sagernet/sing/common"
 )
 
 // ruleSetContentKeyLength is the length of a rule-set content key: the hex encoding of a SHA-256
-// sum, as produced by the rule package. Anything else in the shared bucket is a legacy tag key.
+// sum, as produced by the rule-set cache package. Anything else in the shared bucket is a legacy
+// tag key.
 const ruleSetContentKeyLength = 64
 
 // sweepUnknownBuckets drops buckets left behind by a configuration that no longer declares them,
@@ -57,8 +62,8 @@ func sweepUnknownBuckets(tx *bbolt.Tx) error {
 // sweepLegacyRuleSetCache drops rule-set payloads written before content addressing.
 //
 // Entries used to be namespaced by cacheID and keyed by tag. They are now addressed by a hash of
-// the source URL in one bucket shared across cacheIDs, so no reader can ever reach the old ones
-// again. Nothing else removes them either: `rule_set` is a legitimate bucket name, so
+// the format and source URL in one bucket shared across cacheIDs, so no reader can ever reach the
+// old ones again. Nothing else removes them either: `rule_set` is a legitimate bucket name, so
 // sweepUnknownBuckets treats the stale per-cacheID copies as wanted and keeps them, and bbolt never
 // returns freed pages to the filesystem. A rule-set payload is hundreds of kilobytes and there is
 // one per rule-set per profile, so leaving them is a permanent and not small cost.
@@ -116,4 +121,75 @@ func isRuleSetContentKey(key []byte) bool {
 		}
 	}
 	return true
+}
+
+// PruneRuleSetCache removes content-addressed entries that are no longer referenced by any
+// profile and have reached the update time recorded with their last successful download.
+func PruneRuleSetCache(
+	path string,
+	referencedKeys map[string]struct{},
+	now time.Time,
+) (int, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	db, err := bbolt.Open(path, 0o666, &bbolt.Options{Timeout: time.Second})
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+
+	var deleted int
+	err = db.Update(func(tx *bbolt.Tx) error {
+		var pruneErr error
+		deleted, pruneErr = pruneUnusedRuleSetCache(tx, referencedKeys, now)
+		return pruneErr
+	})
+	return deleted, err
+}
+
+func pruneUnusedRuleSetCache(
+	tx *bbolt.Tx,
+	referencedKeys map[string]struct{},
+	now time.Time,
+) (int, error) {
+	bucket := tx.Bucket(bucketRuleSet)
+	if bucket == nil {
+		return 0, nil
+	}
+	var staleKeys [][]byte
+	err := bucket.ForEach(func(key []byte, value []byte) error {
+		if !isRuleSetContentKey(key) {
+			return nil
+		}
+		if _, referenced := referencedKeys[string(key)]; referenced {
+			return nil
+		}
+		var savedSet adapter.SavedBinary
+		if unmarshalErr := savedSet.UnmarshalBinary(value); unmarshalErr != nil {
+			// A malformed entry is left for normal cache recovery. Startup maintenance must never
+			// turn a decoding failure into broad or speculative deletion.
+			return nil
+		}
+		updateInterval := savedSet.UpdateInterval
+		if updateInterval <= 0 {
+			updateInterval = rulesetcache.DefaultUpdateInterval
+		}
+		if savedSet.LastUpdated.IsZero() || !now.Before(savedSet.LastUpdated.Add(updateInterval)) {
+			staleKeys = append(staleKeys, bytes.Clone(key))
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, key := range staleKeys {
+		if err = bucket.Delete(key); err != nil {
+			return 0, err
+		}
+	}
+	return len(staleKeys), nil
 }

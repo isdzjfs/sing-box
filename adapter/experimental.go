@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/common/varbin"
 )
@@ -52,21 +53,22 @@ type CacheFile interface {
 	StoreSelected(group string, selected string) error
 	LoadGroupExpand(group string) (isExpand bool, loaded bool)
 	StoreGroupExpand(group string, expand bool) error
-	// Rule-set entries are keyed by a content key derived from the source URL, so that identical
-	// remote rule-sets are shared across profiles instead of being cached per cacheID.
+	// Rule-set entries are keyed by format and source URL, so identical remote rule-sets are shared
+	// across profiles and download transports instead of being cached per cacheID.
 	LoadRuleSet(key string) *SavedBinary
 	SaveRuleSet(key string, set *SavedBinary) error
 }
 
 type SavedBinary struct {
-	Content     []byte
-	LastUpdated time.Time
-	LastEtag    string
+	Content        []byte
+	LastUpdated    time.Time
+	LastEtag       string
+	UpdateInterval time.Duration
 }
 
 func (s *SavedBinary) MarshalBinary() ([]byte, error) {
 	var buffer bytes.Buffer
-	err := binary.Write(&buffer, binary.BigEndian, uint8(1))
+	err := binary.Write(&buffer, binary.BigEndian, uint8(2))
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +92,10 @@ func (s *SavedBinary) MarshalBinary() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = binary.Write(&buffer, binary.BigEndian, int64(s.UpdateInterval))
+	if err != nil {
+		return nil, err
+	}
 	return buffer.Bytes(), nil
 }
 
@@ -99,6 +105,9 @@ func (s *SavedBinary) UnmarshalBinary(data []byte) error {
 	err := binary.Read(reader, binary.BigEndian, &version)
 	if err != nil {
 		return err
+	}
+	if version != 1 && version != 2 {
+		return E.New("unknown saved binary version: ", version)
 	}
 	contentLength, err := binary.ReadUvarint(reader)
 	if err != nil {
@@ -125,6 +134,14 @@ func (s *SavedBinary) UnmarshalBinary(data []byte) error {
 		return err
 	}
 	s.LastEtag = string(etagBytes)
+	if version >= 2 {
+		var updateInterval int64
+		err = binary.Read(reader, binary.BigEndian, &updateInterval)
+		if err != nil {
+			return err
+		}
+		s.UpdateInterval = time.Duration(updateInterval)
+	}
 	return nil
 }
 

@@ -4,8 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/bbolt"
+	"github.com/sagernet/sing-box/adapter"
 )
 
 const testContentKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -211,5 +213,78 @@ func TestSweepUnknownBucketsRemovesNestedUnknownBucket(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
+	}
+}
+
+func TestPruneUnusedRuleSetCache(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	now := time.Unix(1_800_000_000, 0)
+	referencedStaleKey := strings.Repeat("a", ruleSetContentKeyLength)
+	orphanFreshKey := strings.Repeat("b", ruleSetContentKeyLength)
+	orphanStaleKey := strings.Repeat("c", ruleSetContentKeyLength)
+	orphanCustomIntervalKey := strings.Repeat("d", ruleSetContentKeyLength)
+
+	encode := func(lastUpdated time.Time, updateInterval time.Duration) []byte {
+		t.Helper()
+		content, err := (&adapter.SavedBinary{
+			Content:        []byte("payload"),
+			LastUpdated:    lastUpdated,
+			UpdateInterval: updateInterval,
+		}).MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	err := db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists(bucketRuleSet)
+		if err != nil {
+			return err
+		}
+		for key, value := range map[string][]byte{
+			referencedStaleKey:      encode(now.Add(-48*time.Hour), 24*time.Hour),
+			orphanFreshKey:          encode(now.Add(-12*time.Hour), 24*time.Hour),
+			orphanStaleKey:          encode(now.Add(-25*time.Hour), 0),
+			orphanCustomIntervalKey: encode(now.Add(-2*time.Hour), time.Hour),
+			"legacy-tag":            encode(now.Add(-48*time.Hour), time.Hour),
+		} {
+			if err = bucket.Put([]byte(key), value); err != nil {
+				return err
+			}
+		}
+		deleted, err := pruneUnusedRuleSetCache(
+			tx,
+			map[string]struct{}{referencedStaleKey: {}},
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		if deleted != 2 {
+			t.Fatalf("deleted %d entries, want 2", deleted)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketRuleSet)
+		for _, key := range []string{referencedStaleKey, orphanFreshKey, "legacy-tag"} {
+			if bucket.Get([]byte(key)) == nil {
+				t.Errorf("entry %q was unexpectedly removed", key)
+			}
+		}
+		for _, key := range []string{orphanStaleKey, orphanCustomIntervalKey} {
+			if bucket.Get([]byte(key)) != nil {
+				t.Errorf("stale orphan %q survived", key)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

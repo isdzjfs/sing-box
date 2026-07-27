@@ -49,11 +49,11 @@ func TestFallbackBudgetCoversEveryMirror(t *testing.T) {
 	}
 }
 
-func TestRuleSetCacheKeyIncludesTransportIdentity(t *testing.T) {
+func TestRuleSetCacheKeyIgnoresTransportIdentity(t *testing.T) {
 	t.Parallel()
-	first := ruleSetCacheKey("binary", "https://example.com/rules.srs", "client-a")
-	second := ruleSetCacheKey("binary", "https://example.com/rules.srs", "client-b")
-	if first == second {
-		t.Fatal("the same URL with different HTTP semantics must not share cached content or ETag")
+	first := ruleSetCacheKey("binary", "https://example.com/rules.srs")
+	second := ruleSetCacheKey("binary", "https://example.com/rules.srs")
+	if first != second {
+		t.Fatal("the same format and URL must share cached content and ETag")
 	}
 }

@@ -3,8 +3,6 @@ package rule
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -14,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/rulesetcache"
 	"github.com/sagernet/sing-box/common/srs"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/deprecated"
@@ -95,7 +94,7 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 	if options.RemoteOptions.UpdateInterval > 0 {
 		updateInterval = time.Duration(options.RemoteOptions.UpdateInterval)
 	} else {
-		updateInterval = 24 * time.Hour
+		updateInterval = rulesetcache.DefaultUpdateInterval
 	}
 	var initialPath string
 	if options.RemoteOptions.InitialPath != "" {
@@ -117,14 +116,11 @@ func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag stri
 	}, nil
 }
 
-// ruleSetCacheKey addresses a cached rule-set by what it points at rather than by its tag. Two
-// profiles that reference the same URL with the same effective HTTP semantics then share one
-// cached payload, and clients that use different headers, TLS, or egress settings never reuse each
-// other's bytes or ETag. Format participates because the same bytes are parsed differently under
-// source and binary.
-func ruleSetCacheKey(format string, url string, transportIdentity string) string {
-	hash := sha256.Sum256([]byte(format + "\x00" + url + "\x00" + transportIdentity))
-	return hex.EncodeToString(hash[:])
+// ruleSetCacheKey addresses cached content by format and URL. Download transport options do not
+// affect the representation identity, allowing profiles that select different proxy nodes to share
+// one payload and ETag.
+func ruleSetCacheKey(format string, url string) string {
+	return rulesetcache.Key(format, url)
 }
 
 func (s *RemoteRuleSet) Name() string {
@@ -142,11 +138,7 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 		return E.Cause(err, "create rule-set http client")
 	}
 	startContext.Register(transport)
-	if identityTransport, loaded := transport.(interface{ CacheIdentity() string }); loaded {
-		s.cacheKey = ruleSetCacheKey(s.options.Format, s.url, identityTransport.CacheIdentity())
-	} else {
-		s.cacheKey = ruleSetCacheKey(s.options.Format, s.url, "")
-	}
+	s.cacheKey = ruleSetCacheKey(s.options.Format, s.url)
 	s.httpClient = &http.Client{Transport: transport}
 	if s.cacheFile != nil {
 		if savedSet := s.cacheFile.LoadRuleSet(s.cacheKey); savedSet != nil {
@@ -157,6 +149,12 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 				s.lastUpdated = savedSet.LastUpdated
 				s.lastEtag = savedSet.LastEtag
 				s.lastEtagURL = s.url
+				if savedSet.UpdateInterval <= 0 || s.updateInterval < savedSet.UpdateInterval {
+					savedSet.UpdateInterval = s.updateInterval
+					if saveErr := s.cacheFile.SaveRuleSet(s.cacheKey, savedSet); saveErr != nil {
+						s.logger.Error("save rule-set update interval: ", saveErr)
+					}
+				}
 			}
 		}
 	}
@@ -433,6 +431,7 @@ func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client 
 			savedRuleSet := s.cacheFile.LoadRuleSet(s.cacheKey)
 			if savedRuleSet != nil {
 				savedRuleSet.LastUpdated = s.lastUpdated
+				savedRuleSet.UpdateInterval = s.updateInterval
 				err = s.cacheFile.SaveRuleSet(s.cacheKey, savedRuleSet)
 				if err != nil {
 					s.logger.Error("save rule-set updated time: ", err)
@@ -470,9 +469,10 @@ func (s *RemoteRuleSet) fetchFrom(ctx context.Context, sourceURL string, client 
 			savedEtag = s.lastEtag
 		}
 		err = s.cacheFile.SaveRuleSet(s.cacheKey, &adapter.SavedBinary{
-			LastUpdated: s.lastUpdated,
-			Content:     content,
-			LastEtag:    savedEtag,
+			LastUpdated:    s.lastUpdated,
+			Content:        content,
+			LastEtag:       savedEtag,
+			UpdateInterval: s.updateInterval,
 		})
 		if err != nil {
 			s.logger.Error("save rule-set cache: ", err)
