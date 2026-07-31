@@ -212,6 +212,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 		}
 		return s.updateStatusError(err)
 	}
+	dialer.ClearServerAddressRecords()
 	if oldInstance != nil {
 		s.instance = nil
 		s.updateStatus(ServiceStatus_STOPPING)

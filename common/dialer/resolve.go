@@ -3,6 +3,7 @@ package dialer
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -97,7 +98,11 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return nil, err
 	}
 	if !destination.IsDomain() {
-		return d.dialer.DialContext(ctx, network, destination)
+		conn, err := d.dialer.DialContext(ctx, network, destination)
+		if err == nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
@@ -105,9 +110,17 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return nil, err
 	}
 	if d.parallel {
-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+		conn, err := N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+		if err == nil && conn != nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	} else {
-		return N.DialSerial(ctx, d.dialer, network, destination, addresses)
+		conn, err := N.DialSerial(ctx, d.dialer, network, destination, addresses)
+		if err == nil && conn != nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	}
 }
 
@@ -117,7 +130,11 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 		return nil, err
 	}
 	if !destination.IsDomain() {
-		return d.dialer.ListenPacket(ctx, destination)
+		conn, err := d.dialer.ListenPacket(ctx, destination)
+		if err == nil {
+			recordServerAddress(destination, destination.Addr)
+		}
+		return conn, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
@@ -128,7 +145,37 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 	if err != nil {
 		return nil, err
 	}
+	recordServerAddress(destination, destinationAddress)
 	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+}
+
+func remoteAddressIP(address net.Addr) []byte {
+	switch typedAddress := address.(type) {
+	case *net.TCPAddr:
+		return typedAddress.IP
+	case *net.UDPAddr:
+		return typedAddress.IP
+	default:
+		return nil
+	}
+}
+
+func recordServerConnection(destination M.Socksaddr, conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	address, ok := netip.AddrFromSlice(remoteAddressIP(conn.RemoteAddr()))
+	if ok {
+		recordServerAddress(destination, address)
+	}
+}
+
+func recordServerAddress(destination M.Socksaddr, address netip.Addr) {
+	server := destination.Fqdn
+	if server == "" && destination.Addr.IsValid() {
+		server = destination.Addr.String()
+	}
+	RecordServerAddress(server, destination.Port, address)
 }
 
 func (d *resolveDialer) QueryOptions() adapter.DNSQueryOptions {
@@ -145,7 +192,11 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		return nil, err
 	}
 	if !destination.IsDomain() {
-		return d.dialer.DialContext(ctx, network, destination)
+		conn, err := d.dialer.DialContext(ctx, network, destination)
+		if err == nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
@@ -156,9 +207,17 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		fallbackDelay = d.fallbackDelay
 	}
 	if d.parallel {
-		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		conn, err := DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		if err == nil && conn != nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	} else {
-		return DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		conn, err := DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		if err == nil && conn != nil {
+			recordServerConnection(destination, conn)
+		}
+		return conn, err
 	}
 }
 
@@ -168,7 +227,11 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 		return nil, err
 	}
 	if !destination.IsDomain() {
-		return d.dialer.ListenPacket(ctx, destination)
+		conn, err := d.dialer.ListenPacket(ctx, destination)
+		if err == nil {
+			recordServerAddress(destination, destination.Addr)
+		}
+		return conn, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
@@ -182,6 +245,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 	if err != nil {
 		return nil, err
 	}
+	recordServerAddress(destination, destinationAddress)
 	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
 }
 
