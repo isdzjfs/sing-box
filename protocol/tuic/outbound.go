@@ -61,7 +61,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	case "quic":
 		tuicUDPStream = true
 	}
-	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+	outboundDialer, err := dialer.NewServer(ctx, tag, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err
 	}

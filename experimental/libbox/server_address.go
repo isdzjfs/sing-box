@@ -9,11 +9,11 @@ type ServerAddressInfo struct {
 	UpdatedAt int64
 }
 
-func GetServerAddressInfo(server string, port int32) *ServerAddressInfo {
+func GetServerAddressInfo(outboundTag string, server string, port int32) *ServerAddressInfo {
 	if port <= 0 || port > 65535 {
 		return nil
 	}
-	address, updatedAt, loaded := dialer.LastServerAddress(server, uint16(port))
+	address, updatedAt, loaded := dialer.LastServerAddress(outboundTag, server, uint16(port))
 	if !loaded {
 		return nil
 	}

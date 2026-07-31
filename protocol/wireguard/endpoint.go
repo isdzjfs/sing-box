@@ -58,8 +58,9 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, E.New("`listen_port` is conflict with `detour`")
 	}
 	outboundDialer, err := dialer.NewWithOptions(dialer.Options{
-		Context: ctx,
-		Options: options.DialerOptions,
+		Context:                ctx,
+		Options:                options.DialerOptions,
+		ServerAddressRecordTag: tag,
 		RemoteIsDomain: common.Any(options.Peers, func(it option.WireGuardPeer) bool {
 			return !M.ParseAddr(it.Address).IsValid()
 		}),

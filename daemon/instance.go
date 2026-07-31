@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
@@ -36,6 +37,7 @@ type Instance struct {
 	outboundManager       adapter.OutboundManager
 	endpointManager       adapter.EndpointManager
 	logFactory            log.Factory
+	serverAddressRecorder *dialer.ServerAddressRecorder
 }
 
 func (s *StartedService) CheckConfig(ctx context.Context, configContent string) error {
@@ -117,10 +119,13 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 	}
 	urlTestHistoryStorage := urltest.NewHistoryStorage()
 	ctx = service.ContextWithPtr(ctx, urlTestHistoryStorage)
+	serverAddressRecorder := dialer.NewServerAddressRecorder()
+	ctx = service.ContextWithPtr(ctx, serverAddressRecorder)
 	i := &Instance{
 		ctx:                   ctx,
 		cancel:                cancel,
 		urlTestHistoryStorage: urlTestHistoryStorage,
+		serverAddressRecorder: serverAddressRecorder,
 	}
 	boxInstance, err := box.New(box.Options{
 		Context:           ctx,
@@ -156,6 +161,7 @@ func attachInstance(ctx context.Context) *Instance {
 		outboundManager:       service.FromContext[adapter.OutboundManager](ctx),
 		endpointManager:       service.FromContext[adapter.EndpointManager](ctx),
 		logFactory:            service.FromContext[log.Factory](ctx),
+		serverAddressRecorder: service.PtrFromContext[dialer.ServerAddressRecorder](ctx),
 	}
 }
 
@@ -167,10 +173,16 @@ func (i *Instance) manualURLTestScheduler() *urlTestScheduler {
 }
 
 func (i *Instance) Start() error {
-	return i.instance.Start()
+	dialer.ActivateServerAddressRecorder(i.serverAddressRecorder)
+	err := i.instance.Start()
+	if err != nil {
+		dialer.DeactivateServerAddressRecorder(i.serverAddressRecorder)
+	}
+	return err
 }
 
 func (i *Instance) Close() error {
+	dialer.DeactivateServerAddressRecorder(i.serverAddressRecorder)
 	i.cancel()
 	i.urlTestHistoryStorage.Close()
 	return i.instance.Close()

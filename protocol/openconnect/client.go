@@ -127,11 +127,12 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	serverAddress, serverAddressErr := netip.ParseAddr(serverURL.Hostname())
 	remoteIsDomain := serverURL.Hostname() != "" && serverAddressErr != nil && !serverAddress.IsValid()
 	outboundDialer, err := dialer.NewWithOptions(dialer.Options{
-		Context:          ctx,
-		Options:          options.DialerOptions,
-		RemoteIsDomain:   remoteIsDomain,
-		ResolverOnDetour: true,
-		NewDialer:        true,
+		Context:                ctx,
+		Options:                options.DialerOptions,
+		RemoteIsDomain:         remoteIsDomain,
+		ResolverOnDetour:       true,
+		NewDialer:              true,
+		ServerAddressRecordTag: tag,
 	})
 	if err != nil {
 		return nil, err

@@ -33,40 +33,46 @@ type ParallelInterfaceResolveDialer interface {
 }
 
 type resolveDialer struct {
-	transport     adapter.DNSTransportManager
-	router        adapter.DNSRouter
-	dialer        N.Dialer
-	parallel      bool
-	server        string
-	initOnce      sync.Once
-	initErr       error
-	queryOptions  adapter.DNSQueryOptions
-	fallbackDelay time.Duration
+	transport              adapter.DNSTransportManager
+	router                 adapter.DNSRouter
+	dialer                 N.Dialer
+	parallel               bool
+	server                 string
+	initOnce               sync.Once
+	initErr                error
+	queryOptions           adapter.DNSQueryOptions
+	fallbackDelay          time.Duration
+	serverAddressRecorder  *ServerAddressRecorder
+	serverAddressRecordTag string
 }
 
-func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
+func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration, serverAddressRecordTag string) ResolveDialer {
 	if parallelDialer, isParallel := dialer.(ParallelInterfaceDialer); isParallel {
 		return &resolveParallelNetworkDialer{
 			resolveDialer{
-				transport:     service.FromContext[adapter.DNSTransportManager](ctx),
-				router:        service.FromContext[adapter.DNSRouter](ctx),
-				dialer:        dialer,
-				parallel:      parallel,
-				server:        server,
-				queryOptions:  queryOptions,
-				fallbackDelay: fallbackDelay,
+				transport:              service.FromContext[adapter.DNSTransportManager](ctx),
+				router:                 service.FromContext[adapter.DNSRouter](ctx),
+				dialer:                 dialer,
+				parallel:               parallel,
+				server:                 server,
+				queryOptions:           queryOptions,
+				fallbackDelay:          fallbackDelay,
+				serverAddressRecorder:  service.PtrFromContext[ServerAddressRecorder](ctx),
+				serverAddressRecordTag: serverAddressRecordTag,
 			},
 			parallelDialer,
 		}
 	}
 	return &resolveDialer{
-		transport:     service.FromContext[adapter.DNSTransportManager](ctx),
-		router:        service.FromContext[adapter.DNSRouter](ctx),
-		dialer:        dialer,
-		parallel:      parallel,
-		server:        server,
-		queryOptions:  queryOptions,
-		fallbackDelay: fallbackDelay,
+		transport:              service.FromContext[adapter.DNSTransportManager](ctx),
+		router:                 service.FromContext[adapter.DNSRouter](ctx),
+		dialer:                 dialer,
+		parallel:               parallel,
+		server:                 server,
+		queryOptions:           queryOptions,
+		fallbackDelay:          fallbackDelay,
+		serverAddressRecorder:  service.PtrFromContext[ServerAddressRecorder](ctx),
+		serverAddressRecordTag: serverAddressRecordTag,
 	}
 }
 
@@ -100,7 +106,7 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 	if !destination.IsDomain() {
 		conn, err := d.dialer.DialContext(ctx, network, destination)
 		if err == nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	}
@@ -112,13 +118,13 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 	if d.parallel {
 		conn, err := N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
 		if err == nil && conn != nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	} else {
 		conn, err := N.DialSerial(ctx, d.dialer, network, destination, addresses)
 		if err == nil && conn != nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	}
@@ -132,7 +138,7 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 	if !destination.IsDomain() {
 		conn, err := d.dialer.ListenPacket(ctx, destination)
 		if err == nil {
-			recordServerAddress(destination, destination.Addr)
+			d.recordServerAddress(destination, destination.Addr)
 		}
 		return conn, err
 	}
@@ -145,7 +151,7 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 	if err != nil {
 		return nil, err
 	}
-	recordServerAddress(destination, destinationAddress)
+	d.recordServerAddress(destination, destinationAddress)
 	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
 }
 
@@ -160,22 +166,25 @@ func remoteAddressIP(address net.Addr) []byte {
 	}
 }
 
-func recordServerConnection(destination M.Socksaddr, conn net.Conn) {
-	if conn == nil {
+func (d *resolveDialer) recordServerConnection(destination M.Socksaddr, conn net.Conn) {
+	if conn == nil || d.serverAddressRecorder == nil || d.serverAddressRecordTag == "" {
 		return
 	}
 	address, ok := netip.AddrFromSlice(remoteAddressIP(conn.RemoteAddr()))
 	if ok {
-		recordServerAddress(destination, address)
+		d.recordServerAddress(destination, address)
 	}
 }
 
-func recordServerAddress(destination M.Socksaddr, address netip.Addr) {
+func (d *resolveDialer) recordServerAddress(destination M.Socksaddr, address netip.Addr) {
+	if d.serverAddressRecorder == nil || d.serverAddressRecordTag == "" {
+		return
+	}
 	server := destination.Fqdn
 	if server == "" && destination.Addr.IsValid() {
 		server = destination.Addr.String()
 	}
-	RecordServerAddress(server, destination.Port, address)
+	d.serverAddressRecorder.Record(d.serverAddressRecordTag, server, destination.Port, address)
 }
 
 func (d *resolveDialer) QueryOptions() adapter.DNSQueryOptions {
@@ -194,7 +203,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 	if !destination.IsDomain() {
 		conn, err := d.dialer.DialContext(ctx, network, destination)
 		if err == nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	}
@@ -209,13 +218,13 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 	if d.parallel {
 		conn, err := DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 		if err == nil && conn != nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	} else {
 		conn, err := DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 		if err == nil && conn != nil {
-			recordServerConnection(destination, conn)
+			d.recordServerConnection(destination, conn)
 		}
 		return conn, err
 	}
@@ -229,7 +238,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 	if !destination.IsDomain() {
 		conn, err := d.dialer.ListenPacket(ctx, destination)
 		if err == nil {
-			recordServerAddress(destination, destination.Addr)
+			d.recordServerAddress(destination, destination.Addr)
 		}
 		return conn, err
 	}
@@ -245,7 +254,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 	if err != nil {
 		return nil, err
 	}
-	recordServerAddress(destination, destinationAddress)
+	d.recordServerAddress(destination, destinationAddress)
 	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
 }
 

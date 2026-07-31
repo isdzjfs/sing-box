@@ -42,7 +42,7 @@ type snellClient interface {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellOutboundOptions) (adapter.Outbound, error) {
-	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+	outboundDialer, err := dialer.NewServer(ctx, tag, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err
 	}

@@ -101,11 +101,12 @@ func NewClientEndpoint(ctx context.Context, router adapter.Router, logger log.Co
 	}
 	clientEndpoint.state.Store(&clientState{localAddresses: clientOptions.Tunnel.LocalAddress})
 	outboundDialer, err := dialer.NewWithOptions(dialer.Options{
-		Context:          ctx,
-		Options:          options.DialerOptions,
-		RemoteIsDomain:   openVPNClientRemoteIsDomain(options),
-		ResolverOnDetour: true,
-		NewDialer:        true,
+		Context:                ctx,
+		Options:                options.DialerOptions,
+		RemoteIsDomain:         openVPNClientRemoteIsDomain(options),
+		ResolverOnDetour:       true,
+		NewDialer:              true,
+		ServerAddressRecordTag: tag,
 	})
 	if err != nil {
 		return nil, err

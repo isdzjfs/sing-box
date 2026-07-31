@@ -20,6 +20,7 @@ type Options struct {
 	Context                 context.Context
 	Options                 option.DialerOptions
 	RemoteIsDomain          bool
+	ServerAddressRecordTag  string
 	DirectResolver          bool
 	ResolverOnDetour        bool
 	NewDialer               bool
@@ -34,6 +35,16 @@ func New(ctx context.Context, options option.DialerOptions, remoteIsDomain bool)
 		Context:        ctx,
 		Options:        options,
 		RemoteIsDomain: remoteIsDomain,
+	})
+}
+
+// NewServer creates a dialer for a fixed outbound server and enables address recording for its tag.
+func NewServer(ctx context.Context, tag string, options option.DialerOptions, remoteIsDomain bool) (N.Dialer, error) {
+	return NewWithOptions(Options{
+		Context:                ctx,
+		Options:                options,
+		RemoteIsDomain:         remoteIsDomain,
+		ServerAddressRecordTag: tag,
 	})
 }
 
@@ -140,6 +151,7 @@ func NewWithOptions(options Options) (N.Dialer, error) {
 			server,
 			dnsQueryOptions,
 			resolveFallbackDelay,
+			options.ServerAddressRecordTag,
 		)
 	}
 	return dialer, nil
