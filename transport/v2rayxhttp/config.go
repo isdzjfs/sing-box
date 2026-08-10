@@ -226,8 +226,10 @@ func (c *config) normalizedPath() string {
 	if path == "" || path[0] != '/' {
 		path = "/" + path
 	}
-	if path[len(path)-1] != '/' {
-		path += "/"
+	if c.sessionIDPlacement == placementPath || c.seqPlacement == placementPath {
+		if path[len(path)-1] != '/' {
+			path += "/"
+		}
 	}
 	return path
 }

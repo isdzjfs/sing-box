@@ -26,7 +26,7 @@ type xmuxConfig struct {
 func newXMuxConfig(options *option.V2RayXHTTPXMuxOptions) (*xmuxConfig, error) {
 	config := &xmuxConfig{}
 	if options == nil || *options == (option.V2RayXHTTPXMuxOptions{}) {
-		config.maxConnections = &rangeConfig{from: 6, to: 6}
+		config.maxConnections = &rangeConfig{from: 3, to: 3}
 		config.hMaxRequestTimes = &rangeConfig{from: 600, to: 900}
 		config.hMaxReusableSecs = &rangeConfig{from: 1800, to: 3000}
 		return config, nil

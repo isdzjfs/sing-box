@@ -286,7 +286,7 @@ XHTTP padding 大小范围。
 
 XHTTP 连接复用设置。
 
-如果省略，将使用与 Xray 兼容的默认值：`max_connections` 为 `6`，`h_max_request_times` 为 `600-900`，`h_max_reusable_secs` 为 `1800-3000`。
+如果省略，将使用与 Xray 兼容的默认值：`max_connections` 为 `3`，`h_max_request_times` 为 `600-900`，`h_max_reusable_secs` 为 `1800-3000`。
 
 `max_connections` 和 `max_concurrency` 不能同时设置。
 

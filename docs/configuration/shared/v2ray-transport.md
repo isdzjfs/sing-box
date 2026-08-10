@@ -297,7 +297,7 @@ It also accepts the string form `"100-1000"` for compatibility.
 
 XHTTP connection reuse settings.
 
-If omitted, Xray-compatible defaults are used: `max_connections` is `6`, `h_max_request_times` is `600-900`, and `h_max_reusable_secs` is `1800-3000`.
+If omitted, Xray-compatible defaults are used: `max_connections` is `3`, `h_max_request_times` is `600-900`, and `h_max_reusable_secs` is `1800-3000`.
 
 `max_connections` and `max_concurrency` cannot be set together.
 

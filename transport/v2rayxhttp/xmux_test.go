@@ -13,7 +13,7 @@ func TestXMuxDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.maxConnections.from != 6 || config.maxConnections.to != 6 {
+	if config.maxConnections.from != 3 || config.maxConnections.to != 3 {
 		t.Fatalf("unexpected default max_connections: %d-%d", config.maxConnections.from, config.maxConnections.to)
 	}
 	if config.hMaxRequestTimes.from != 600 || config.hMaxRequestTimes.to != 900 {
