@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"os"
-	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -20,35 +19,41 @@ import (
 	"github.com/sagernet/sing/common/uot"
 
 	anytls "github.com/anytls/sing-anytls"
-	anytlsutil "github.com/anytls/sing-anytls/util"
+	"github.com/anytls/sing-anytls/session"
 )
 
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.AnyTLSOutboundOptions](registry, C.TypeAnyTLS, NewOutbound)
 }
 
-var clientVersionAccess sync.Mutex
+var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
 
 type Outbound struct {
 	outbound.Adapter
-	ctx           context.Context
-	dialer        tls.Dialer
-	server        M.Socksaddr
-	tlsConfig     tls.Config
-	clientOptions anytls.ClientConfig
-	clientName    string
-	client        *anytls.Client
-	uotClient     *uot.Client
-	logger        log.ContextLogger
+	ctx            context.Context
+	dialer         tls.Dialer
+	server         M.Socksaddr
+	tlsConfig      tls.Config
+	clientOptions  anytls.ClientConfig
+	clientMetadata string
+	client         *anytls.Client
+	sessionClient  *session.Client
+	uotClient      *uot.Client
+	logger         log.ContextLogger
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AnyTLSOutboundOptions) (adapter.Outbound, error) {
+	clientMetadata := options.ClientMetadata
+	if clientMetadata == "" {
+		// Preserve the downstream client_name option as a compatibility alias.
+		clientMetadata = options.ClientName
+	}
 	outbound := &Outbound{
-		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeAnyTLS, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
-		ctx:        ctx,
-		server:     options.ServerOptions.Build(),
-		clientName: options.ClientName,
-		logger:     logger,
+		Adapter:        outbound.NewAdapterWithDialerOptions(C.TypeAnyTLS, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+		ctx:            ctx,
+		server:         options.ServerOptions.Build(),
+		clientMetadata: clientMetadata,
+		logger:         logger,
 	}
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
@@ -99,11 +104,26 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 		return err
 	}
 	h.client = client
+	h.sessionClient = sessionClientOf(client)
 	h.uotClient = &uot.Client{
 		Dialer:  (anytlsDialer)(h.createProxy),
 		Version: uot.Version,
 	}
 	return nil
+}
+
+func (h *Outbound) createProxy(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	conn, err := h.sessionClient.CreateStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h.rewriteClientMetadata(conn)
+	err = M.SocksaddrSerializer.WriteAddrPort(conn, destination)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 type anytlsDialer func(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
@@ -116,24 +136,12 @@ func (d anytlsDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	return nil, os.ErrInvalid
 }
 
-func (h *Outbound) createProxy(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	// sing-anytls v0.0.11 reads util.Verison from a package global in Session.Run.
-	// Serialize session creation so one outbound's client_name cannot leak into another.
-	clientVersionAccess.Lock()
-	defer clientVersionAccess.Unlock()
-	if h.clientName == "" {
-		return h.client.CreateProxy(ctx, destination)
-	}
-	previousVersion := anytlsutil.Verison
-	anytlsutil.Verison = h.clientName
-	defer func() {
-		anytlsutil.Verison = previousVersion
-	}()
-	return h.client.CreateProxy(ctx, destination)
-}
-
 func (h *Outbound) dialOut(ctx context.Context) (net.Conn, error) {
 	return h.dialer.DialTLSContext(ctx, h.server)
+}
+
+func (h *Outbound) MultiplexEnabled() bool {
+	return true
 }
 
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
