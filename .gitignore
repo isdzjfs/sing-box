@@ -24,3 +24,4 @@ AGENTS.md
 .codex/config.toml
 /.codex-gocache/
 /proxy_providers
+*.md
