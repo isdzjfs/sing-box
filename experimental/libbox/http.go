@@ -76,6 +76,10 @@ type httpClient struct {
 }
 
 func NewHTTPClient() HTTPClient {
+	return newHTTPClient()
+}
+
+func newHTTPClient() *httpClient {
 	client := new(httpClient)
 	client.client.Transport = &client.transport
 	client.transport.ForceAttemptHTTP2 = true

@@ -221,6 +221,10 @@ func (m *Manager) Remove(tag string) error {
 	if !found {
 		return os.ErrInvalid
 	}
+	dependBy := m.dependByTag[tag]
+	if len(dependBy) > 0 {
+		return E.New("outbound[", tag, "] is depended by ", strings.Join(dependBy, ", "))
+	}
 	delete(m.outboundByTag, tag)
 	index := common.Index(m.outbounds, func(it adapter.Outbound) bool {
 		return it == outbound
@@ -238,10 +242,6 @@ func (m *Manager) Remove(tag string) error {
 			m.defaultOutbound = nil
 		}
 	}
-	dependBy := m.dependByTag[tag]
-	if len(dependBy) > 0 {
-		return E.New("outbound[", tag, "] is depended by ", strings.Join(dependBy, ", "))
-	}
 	dependencies := outbound.Dependencies()
 	for _, dependency := range dependencies {
 		if len(m.dependByTag[dependency]) == 1 {
@@ -256,6 +256,72 @@ func (m *Manager) Remove(tag string) error {
 		return common.Close(outbound)
 	}
 	return nil
+}
+
+// Add registers an already constructed outbound. It is used by runtime
+// providers to publish a stable wrapper while keeping the concrete proxy
+// implementation private to the provider lifecycle.
+func (m *Manager) Add(outbound adapter.Outbound) error {
+	tag := outbound.Tag()
+	if tag == "" {
+		return os.ErrInvalid
+	}
+	m.access.RLock()
+	_, exists := m.outboundByTag[tag]
+	started := m.started
+	stage := m.stage
+	m.access.RUnlock()
+	if exists {
+		return E.New("outbound already exists: ", tag)
+	}
+	if started {
+		name := "outbound/" + outbound.Type() + "[" + tag + "]"
+		for _, startStage := range adapter.ListStartStages {
+			if startStage > stage {
+				break
+			}
+			done := adapter.LogElapsed(m.logger, startStage, " ", name)
+			err := adapter.LegacyStart(outbound, startStage)
+			done()
+			if err != nil {
+				return E.Cause(err, startStage, " ", name)
+			}
+		}
+	}
+	m.access.Lock()
+	defer m.access.Unlock()
+	if _, loaded := m.outboundByTag[tag]; loaded {
+		return E.New("outbound already exists: ", tag)
+	}
+	m.outbounds = append(m.outbounds, outbound)
+	m.outboundByTag[tag] = outbound
+	for _, dependency := range outbound.Dependencies() {
+		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
+	}
+	if m.defaultTag != "" && tag == m.defaultTag {
+		m.defaultOutbound = outbound
+	}
+	return nil
+}
+
+func (m *Manager) UpdateDependencies(tag string, previous []string, current []string) {
+	m.access.Lock()
+	defer m.access.Unlock()
+	for _, dependency := range previous {
+		dependBy := common.Filter(m.dependByTag[dependency], func(it string) bool {
+			return it != tag
+		})
+		if len(dependBy) == 0 {
+			delete(m.dependByTag, dependency)
+		} else {
+			m.dependByTag[dependency] = dependBy
+		}
+	}
+	for _, dependency := range current {
+		if !common.Contains(m.dependByTag[dependency], tag) {
+			m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
+		}
+	}
 }
 
 func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {

@@ -3,7 +3,9 @@ package group
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +29,34 @@ func TestURLTestPreservesIcon(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "https://127.0.0.1:1/unavailable.png", outbound.(adapter.OutboundGroupIcon).Icon())
+}
+
+func TestURLTestUpdateOutboundsReplacesMemberSnapshot(t *testing.T) {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	history := urltest.NewHistoryStorage()
+	ctx := service.ContextWithPtr(baseCtx, history)
+	ctx = pause.WithDefaultManager(ctx)
+	staleOutbound := &testURLTestOutbound{tag: "stale"}
+	newOutbound := &testURLTestOutbound{tag: "new"}
+	manager := &testURLTestOutboundManager{outbounds: map[string]adapter.Outbound{
+		"stale": staleOutbound,
+		"new":   newOutbound,
+	}}
+	group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{staleOutbound}, "", time.Minute, 0, time.Minute, false)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, group.Close())
+	})
+	outbound := &URLTest{
+		outbound: manager,
+		tags:     []string{"stale"},
+		group:    group,
+	}
+
+	require.NoError(t, outbound.UpdateOutbounds([]string{"new"}))
+	require.Equal(t, []string{"new"}, outbound.All())
+	require.Equal(t, []adapter.Outbound{newOutbound}, group.outboundsSnapshot())
 }
 
 func TestURLTestGroupPostStartStartsTicker(t *testing.T) {
@@ -676,7 +706,8 @@ func (c *testURLTestPacketConn) Closed() bool {
 }
 
 type testURLTestOutboundManager struct {
-	outbound adapter.Outbound
+	outbound  adapter.Outbound
+	outbounds map[string]adapter.Outbound
 }
 
 func (m *testURLTestOutboundManager) Start(stage adapter.StartStage) error {
@@ -688,10 +719,17 @@ func (m *testURLTestOutboundManager) Close() error {
 }
 
 func (m *testURLTestOutboundManager) Outbounds() []adapter.Outbound {
+	if m.outbounds != nil {
+		return slices.Collect(maps.Values(m.outbounds))
+	}
 	return []adapter.Outbound{m.outbound}
 }
 
 func (m *testURLTestOutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
+	if m.outbounds != nil {
+		outbound, loaded := m.outbounds[tag]
+		return outbound, loaded
+	}
 	return m.outbound, tag == m.outbound.Tag()
 }
 

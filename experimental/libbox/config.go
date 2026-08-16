@@ -70,6 +70,51 @@ func ResolveConfig(configContent string) (*StringBox, error) {
 	return wrapString(buffer.String()), nil
 }
 
+// UpdateProxyProviders refreshes provider caches explicitly without moving network access back
+// into CheckConfig, ResolveConfig, or Box startup.
+func UpdateProxyProviders(configContent string) (int32, error) {
+	return updateProxyProviders(configContent, false)
+}
+
+// UpdateMissingProxyProviders prepares a newly added Android profile without re-downloading a
+// provider whose source-matched cache is already usable.
+func UpdateMissingProxyProviders(configContent string) (int32, error) {
+	return updateProxyProviders(configContent, true)
+}
+
+func updateProxyProviders(configContent string, missingOnly bool) (int32, error) {
+	ctx := baseContext(nil)
+	options, err := parseConfig(ctx, configContent)
+	if err != nil {
+		return 0, err
+	}
+	if len(options.ProxyProviders) == 0 {
+		return 0, nil
+	}
+	client := newHTTPClient()
+	defer client.Close()
+	var updated int
+	if missingOnly {
+		updated, err = proxyprovider.UpdateMissingHTTPProviders(
+			ctx,
+			log.NewNOPFactory().Logger(),
+			&options,
+			&client.transport,
+		)
+	} else {
+		updated, err = proxyprovider.UpdateHTTPProviders(
+			ctx,
+			log.NewNOPFactory().Logger(),
+			&options,
+			&client.transport,
+		)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return int32(updated), nil
+}
+
 func resolveConfig(configContent string) (option.Options, error) {
 	ctx := baseContext(nil)
 	options, err := parseConfig(ctx, configContent)

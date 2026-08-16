@@ -121,6 +121,8 @@ message GroupItem {
   string type = 2;
   int64 urlTestTime = 3;
   int32 urlTestDelay = 4;
+  string server = 5;
+  int32 serverPort = 6;
 }
 
 message URLTestRequest {

@@ -558,6 +558,11 @@ func (s *StartedService) readGroups() *Groups {
 			var item GroupItem
 			item.Tag = itemTag
 			item.Type = itemOutbound.Type()
+			if serverOutbound, loaded := itemOutbound.(adapter.OutboundServer); loaded {
+				serverAddress := serverOutbound.ServerAddress()
+				item.Server = serverAddress.AddrString()
+				item.ServerPort = int32(serverAddress.Port)
+			}
 			if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(itemOutbound)); history != nil {
 				item.UrlTestTime = history.Time.Unix()
 				item.UrlTestDelay = int32(history.Delay)
@@ -1171,6 +1176,11 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 				item := &GroupItem{
 					Tag:  ob.Tag(),
 					Type: ob.Type(),
+				}
+				if serverOutbound, loaded := ob.(adapter.OutboundServer); loaded {
+					serverAddress := serverOutbound.ServerAddress()
+					item.Server = serverAddress.AddrString()
+					item.ServerPort = int32(serverAddress.Port)
 				}
 				if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(ob)); history != nil {
 					item.UrlTestTime = history.Time.Unix()

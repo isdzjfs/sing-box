@@ -60,6 +60,7 @@ type Box struct {
 	connection          *route.ConnectionManager
 	router              *route.Router
 	httpClientService   adapter.LifecycleService
+	proxyProvider       *proxyprovider.Manager
 	internalService     []adapter.LifecycleService
 	done                chan struct{}
 }
@@ -186,7 +187,7 @@ func New(options Options) (*Box, error) {
 		return nil, E.Cause(err, "create log factory")
 	}
 	service.MustRegister[log.Factory](ctx, logFactory)
-	err = proxyprovider.Expand(ctx, logFactory.NewLogger("proxy-provider"), &options.Options)
+	proxyProviderRuntime, err := proxyprovider.ExpandRuntime(ctx, logFactory.NewLogger("proxy-provider"), &options.Options)
 	if err != nil {
 		return nil, E.Cause(err, "expand proxy providers")
 	}
@@ -370,6 +371,23 @@ func New(options Options) (*Box, error) {
 			return nil, E.Cause(err, "initialize outbound[", i, "]")
 		}
 	}
+	proxyProviderManager, err := proxyprovider.NewManager(proxyprovider.ManagerOptions{
+		Context:            ctx,
+		Logger:             logFactory.NewLogger("proxy-provider"),
+		LogFactory:         logFactory,
+		Router:             router,
+		OutboundRegistry:   outboundRegistry,
+		EndpointRegistry:   endpointRegistry,
+		OutboundManager:    outboundManager,
+		HTTPClientManager:  httpClientManager,
+		Runtime:            proxyProviderRuntime,
+		AddOutbound:        outboundManager.Add,
+		RemoveOutbound:     outboundManager.Remove,
+		UpdateDependencies: outboundManager.UpdateDependencies,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "initialize proxy-provider manager")
+	}
 	for i, certificateProviderOptions := range options.CertificateProviders {
 		var tag string
 		if certificateProviderOptions.Tag != "" {
@@ -478,6 +496,7 @@ func New(options Options) (*Box, error) {
 		connection:          connectionManager,
 		router:              router,
 		httpClientService:   httpClientService,
+		proxyProvider:       proxyProviderManager,
 		createdAt:           createdAt,
 		debugOptions:        debugOptions,
 		logFactory:          logFactory,
@@ -598,6 +617,12 @@ func (s *Box) start() error {
 	if err != nil {
 		return err
 	}
+	if s.proxyProvider != nil {
+		err = s.proxyProvider.Start(adapter.StartStateStarted)
+		if err != nil {
+			return E.Cause(err, "start proxy-provider")
+		}
+	}
 	return nil
 }
 
@@ -614,6 +639,12 @@ func (s *Box) Close() error {
 			return E.Cause(err, "close debug HTTP server")
 		})
 		s.debugHTTPServer = nil
+	}
+	if s.proxyProvider != nil {
+		err = E.Append(err, s.proxyProvider.Close(), func(err error) error {
+			return E.Cause(err, "close proxy-provider")
+		})
+		s.proxyProvider = nil
 	}
 	for _, closeItem := range []struct {
 		name    string

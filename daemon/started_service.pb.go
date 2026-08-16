@@ -771,6 +771,8 @@ type GroupItem struct {
 	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
 	UrlTestTime   int64                  `protobuf:"varint,3,opt,name=urlTestTime,proto3" json:"urlTestTime,omitempty"`
 	UrlTestDelay  int32                  `protobuf:"varint,4,opt,name=urlTestDelay,proto3" json:"urlTestDelay,omitempty"`
+	Server        string                 `protobuf:"bytes,5,opt,name=server,proto3" json:"server,omitempty"`
+	ServerPort    int32                  `protobuf:"varint,6,opt,name=serverPort,proto3" json:"serverPort,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -829,6 +831,20 @@ func (x *GroupItem) GetUrlTestTime() int64 {
 func (x *GroupItem) GetUrlTestDelay() int32 {
 	if x != nil {
 		return x.UrlTestDelay
+	}
+	return 0
+}
+
+func (x *GroupItem) GetServer() string {
+	if x != nil {
+		return x.Server
+	}
+	return ""
+}
+
+func (x *GroupItem) GetServerPort() int32 {
+	if x != nil {
+		return x.ServerPort
 	}
 	return 0
 }
@@ -6376,12 +6392,16 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"selectable\x12\x1a\n" +
 	"\bselected\x18\x04 \x01(\tR\bselected\x12\x1a\n" +
 	"\bisExpand\x18\x05 \x01(\bR\bisExpand\x12'\n" +
-	"\x05items\x18\x06 \x03(\v2\x11.daemon.GroupItemR\x05items\"w\n" +
+	"\x05items\x18\x06 \x03(\v2\x11.daemon.GroupItemR\x05items\"\xaf\x01\n" +
 	"\tGroupItem\x12\x10\n" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12 \n" +
 	"\vurlTestTime\x18\x03 \x01(\x03R\vurlTestTime\x12\"\n" +
-	"\furlTestDelay\x18\x04 \x01(\x05R\furlTestDelay\"L\n" +
+	"\furlTestDelay\x18\x04 \x01(\x05R\furlTestDelay\x12\x16\n" +
+	"\x06server\x18\x05 \x01(\tR\x06server\x12\x1e\n" +
+	"\n" +
+	"serverPort\x18\x06 \x01(\x05R\n" +
+	"serverPort\"L\n" +
 	"\x0eURLTestRequest\x12 \n" +
 	"\voutboundTag\x18\x01 \x01(\tR\voutboundTag\x12\x18\n" +
 	"\aitemTag\x18\x02 \x01(\tR\aitemTag\"U\n" +

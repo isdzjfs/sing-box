@@ -130,6 +130,7 @@ proxies:
 `))
 	}))
 	defer server.Close()
+	cachePath := writeSubscription(t, "\nproxies:\n  - name: HK VLESS\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 00000000-0000-0000-0000-000000000000\n    tls: true\n    skip-cert-verify: true\n")
 	disableInsecure := false
 	selectorOptions := &option.SelectorOutboundOptions{Use: []string{"sub"}}
 	options := option.Options{
@@ -142,7 +143,7 @@ proxies:
 		ProxyProviders: map[string]option.ProxyProvider{
 			"sub": {
 				URL:  server.URL,
-				Path: filepath.Join(t.TempDir(), "subscription.yaml"),
+				Path: cachePath,
 			},
 		},
 		Outbounds: []option.Outbound{
@@ -1520,7 +1521,7 @@ proxies:
 	}
 }
 
-func TestExpandHTTPProviderDirectProxyFetchesDirectly(t *testing.T) {
+func TestExpandHTTPProviderDirectProxyDoesNotFetchDuringExpansion(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -1553,10 +1554,10 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
-	if got, want := selectorOptions.Outbounds, []string{"Direct SS"}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := selectorOptions.Outbounds, []string{"empty-outbound-group"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
 	}
 }
@@ -1645,8 +1646,8 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 	if got, want := selectorOptions.Outbounds, []string{"Cached SS"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
@@ -1691,8 +1692,8 @@ proxies:
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 	if got, want := selectorOptions.Outbounds, []string{"Cached SS"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
@@ -1734,8 +1735,8 @@ func TestExpandHTTPProviderFetchFailureWithoutCacheSkipsProvider(t *testing.T) {
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)
@@ -1773,8 +1774,8 @@ func TestExpandHTTPProviderInvalidFetchedContentWithoutCacheSkipsProvider(t *tes
 	if err := Expand(context.Background(), log.NewNOPFactory().Logger(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 	if got, want := selectorOptions.Outbounds, []string{"DIRECT"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("selector outbounds = %#v, want %#v", got, want)

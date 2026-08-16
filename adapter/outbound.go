@@ -7,6 +7,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -29,6 +30,11 @@ type OutboundWithPreferredRoutes interface {
 type OutboundWithMultiplex interface {
 	Outbound
 	MultiplexEnabled() bool
+}
+
+type OutboundServer interface {
+	Outbound
+	ServerAddress() M.Socksaddr
 }
 
 type FlowOutbound interface {

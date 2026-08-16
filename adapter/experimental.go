@@ -157,6 +157,13 @@ type OutboundGroup interface {
 	All() []string
 }
 
+// OutboundGroupUpdater is implemented by groups whose member snapshot can be
+// replaced after a runtime proxy-provider update.
+type OutboundGroupUpdater interface {
+	OutboundGroup
+	UpdateOutbounds(outbounds []string) error
+}
+
 type OutboundGroupIcon interface {
 	Icon() string
 }

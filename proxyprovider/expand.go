@@ -2,13 +2,16 @@ package proxyprovider
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	stdjson "encoding/json"
 	"errors"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +33,7 @@ type resolvedProvider struct {
 	proxies   []resolvedProxy
 	outbounds []option.Outbound
 	endpoints []option.Endpoint
+	content   providerContent
 }
 
 type resolvedProxy struct {
@@ -48,13 +52,44 @@ type providerContentSource uint8
 const (
 	providerContentSourceFile providerContentSource = iota
 	providerContentSourceCache
-	providerContentSourceFetched
 )
 
 type providerContent struct {
-	content   []byte
-	cachePath string
-	source    providerContentSource
+	content     []byte
+	cachePath   string
+	source      providerContentSource
+	modTime     time.Time
+	etag        string
+	modified    string
+	fingerprint string
+}
+
+type providerCacheMetadata struct {
+	ETag              string    `json:"etag,omitempty"`
+	LastModified      string    `json:"last_modified,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	ContentSHA256     string    `json:"content_sha256,omitempty"`
+	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
+}
+
+type groupDefinition struct {
+	tag           string
+	outbounds     []string
+	use           []string
+	filter        string
+	excludeFilter string
+	excludeType   string
+}
+
+// RuntimeConfig is the provider snapshot prepared without network access during
+// box construction. NewManager consumes it after core managers are registered.
+type RuntimeConfig struct {
+	providers      map[string]option.ProxyProvider
+	resolved       map[string]resolvedProvider
+	groups         []groupDefinition
+	staticTags     map[string]bool
+	domainResolver string
+	fallbackTag    string
 }
 
 func (e providerContentUnavailable) Error() string {
@@ -66,12 +101,28 @@ func (e providerContentUnavailable) Unwrap() error {
 }
 
 func Expand(ctx context.Context, logger log.ContextLogger, options *option.Options) error {
+	_, err := expand(ctx, logger, options, false)
+	return err
+}
+
+func ExpandRuntime(ctx context.Context, logger log.ContextLogger, options *option.Options) (*RuntimeConfig, error) {
+	return expand(ctx, logger, options, true)
+}
+
+func expand(ctx context.Context, logger log.ContextLogger, options *option.Options, runtime bool) (*RuntimeConfig, error) {
 	if len(options.ProxyProviders) == 0 {
-		return nil
+		return nil, nil
 	}
 	usedTags := existingOutboundTags(options)
 	domainResolver := providerDomainResolver(options)
 	providers := make(map[string]resolvedProvider, len(options.ProxyProviders))
+	runtimeConfig := &RuntimeConfig{
+		providers:      make(map[string]option.ProxyProvider, len(options.ProxyProviders)),
+		resolved:       providers,
+		groups:         captureGroupDefinitions(options.Outbounds),
+		staticTags:     cloneTagSet(usedTags),
+		domainResolver: domainResolver,
+	}
 	providerNames := make([]string, 0, len(options.ProxyProviders))
 	for name := range options.ProxyProviders {
 		providerNames = append(providerNames, name)
@@ -83,6 +134,14 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 		if options.ProxyProviderDefaults != nil {
 			providerOptions = mergeProxyProviderDefaults(*options.ProxyProviderDefaults, providerOptions)
 		}
+		if providerOptions.Type == "" {
+			if providerOptions.URL != "" {
+				providerOptions.Type = "http"
+			} else {
+				providerOptions.Type = "file"
+			}
+		}
+		runtimeConfig.providers[name] = providerOptions
 		provider, err := resolveProvider(ctx, logger, name, providerOptions, usedTags, domainResolver)
 		if err != nil {
 			var unavailable providerContentUnavailable
@@ -92,7 +151,7 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 				hasUnavailableProvider = true
 				continue
 			}
-			return E.Cause(err, "proxy-provider ", name)
+			return nil, E.Cause(err, "proxy-provider ", name)
 		}
 		providers[name] = provider
 		options.Endpoints = append(options.Endpoints, provider.endpoints...)
@@ -100,11 +159,93 @@ func Expand(ctx context.Context, logger log.ContextLogger, options *option.Optio
 	}
 	for i := range options.Outbounds {
 		if err := expandOutboundUse(&options.Outbounds[i], providers); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	pruneMissingGroupDependencies(logger, options, hasUnavailableProvider)
-	return nil
+	if runtime {
+		runtimeConfig.fallbackTag = ensureRuntimeFallback(options, runtimeConfig.groups)
+		removeRuntimeProviderOptions(options, providers)
+		return runtimeConfig, nil
+	}
+	return nil, nil
+}
+
+func cloneTagSet(tags map[string]bool) map[string]bool {
+	cloned := make(map[string]bool, len(tags))
+	for tag, exists := range tags {
+		cloned[tag] = exists
+	}
+	return cloned
+}
+
+func captureGroupDefinitions(outbounds []option.Outbound) []groupDefinition {
+	var groups []groupDefinition
+	for index, outbound := range outbounds {
+		tag := outbound.Tag
+		if tag == "" {
+			tag = stringIndex(index)
+		}
+		switch outbound.Type {
+		case C.TypeSelector:
+			groupOptions, loaded := outbound.Options.(*option.SelectorOutboundOptions)
+			if !loaded {
+				continue
+			}
+			groups = append(groups, groupDefinition{
+				tag:           tag,
+				outbounds:     slices.Clone(groupOptions.Outbounds),
+				use:           slices.Clone(groupOptions.Use),
+				filter:        groupOptions.Filter,
+				excludeFilter: groupOptions.ExcludeFilter,
+				excludeType:   groupOptions.ExcludeType,
+			})
+		case C.TypeURLTest:
+			groupOptions, loaded := outbound.Options.(*option.URLTestOutboundOptions)
+			if !loaded {
+				continue
+			}
+			groups = append(groups, groupDefinition{
+				tag:           tag,
+				outbounds:     slices.Clone(groupOptions.Outbounds),
+				use:           slices.Clone(groupOptions.Use),
+				filter:        groupOptions.Filter,
+				excludeFilter: groupOptions.ExcludeFilter,
+				excludeType:   groupOptions.ExcludeType,
+			})
+		}
+	}
+	return groups
+}
+
+func ensureRuntimeFallback(options *option.Options, groups []groupDefinition) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	for _, outbound := range options.Outbounds {
+		if outbound.Type == C.TypeBlock && strings.HasPrefix(outbound.Tag, "empty-outbound-group") {
+			return outbound.Tag
+		}
+	}
+	return addEmptyGroupFallback(options, existingOutboundTags(options))
+}
+
+func removeRuntimeProviderOptions(options *option.Options, providers map[string]resolvedProvider) {
+	providerTags := make(map[string]bool)
+	for _, provider := range providers {
+		for _, outbound := range provider.outbounds {
+			providerTags[outbound.Tag] = true
+		}
+		for _, endpoint := range provider.endpoints {
+			providerTags[endpoint.Tag] = true
+		}
+	}
+	options.Outbounds = slices.DeleteFunc(options.Outbounds, func(outbound option.Outbound) bool {
+		return providerTags[outbound.Tag]
+	})
+	options.Endpoints = slices.DeleteFunc(options.Endpoints, func(endpoint option.Endpoint) bool {
+		return providerTags[endpoint.Tag]
+	})
 }
 
 func providerDomainResolver(options *option.Options) string {
@@ -313,6 +454,10 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 	if err != nil {
 		return resolvedProvider{}, err
 	}
+	return resolveProviderContent(ctx, logger, name, provider, loadedContent, usedTags, domainResolver)
+}
+
+func resolveProviderContent(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider, loadedContent providerContent, usedTags map[string]bool, domainResolver string) (resolvedProvider, error) {
 	subscription, err := resolveProviderSubscription(ctx, logger, name, provider, loadedContent)
 	if err != nil {
 		return resolvedProvider{}, err
@@ -329,7 +474,7 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 	if err != nil {
 		return resolvedProvider{}, E.Cause(err, "exclude-type")
 	}
-	var resolved resolvedProvider
+	resolved := resolvedProvider{content: loadedContent}
 	for index, proxy := range subscription.Proxies {
 		rawName := stringValue(proxy, "name")
 		if rawName == "" {
@@ -370,44 +515,12 @@ func resolveProvider(ctx context.Context, logger log.ContextLogger, name string,
 func resolveProviderSubscription(ctx context.Context, logger log.ContextLogger, name string, provider option.ProxyProvider, loaded providerContent) (subscriptionFile, error) {
 	subscription, err := parseNonEmptySubscription(loaded.content)
 	if err == nil {
-		if loaded.source == providerContentSourceFetched {
-			saveProviderCache(logger, name, loaded.cachePath, loaded.content)
-		}
 		return subscription, nil
 	}
 	if !strings.EqualFold(provider.Type, "http") {
 		return subscriptionFile{}, err
 	}
-	switch loaded.source {
-	case providerContentSourceFetched:
-		cached, readErr := os.ReadFile(loaded.cachePath)
-		if readErr != nil {
-			return subscriptionFile{}, providerContentUnavailable{err: err}
-		}
-		cachedSubscription, cachedErr := parseNonEmptySubscription(cached)
-		if cachedErr != nil {
-			logger.Warn("fetch proxy-provider ", name, " returned unusable content and cached content is unusable: ", cachedErr)
-			return subscriptionFile{}, providerContentUnavailable{err: err}
-		}
-		logger.Warn("fetch proxy-provider ", name, " returned unusable content, using cached content: ", err)
-		return cachedSubscription, nil
-	case providerContentSourceCache:
-		fetched, fetchErr := fetchProviderContent(ctx, provider)
-		if fetchErr != nil {
-			logger.Warn("cached proxy-provider ", name, " content is unusable and refetch failed: ", fetchErr)
-			return subscriptionFile{}, providerContentUnavailable{err: err}
-		}
-		fetchedSubscription, fetchedErr := parseNonEmptySubscription(fetched)
-		if fetchedErr != nil {
-			logger.Warn("cached proxy-provider ", name, " content is unusable and refetched content is unusable: ", fetchedErr)
-			return subscriptionFile{}, providerContentUnavailable{err: err}
-		}
-		logger.Warn("cached proxy-provider ", name, " content is unusable, using refetched content: ", err)
-		saveProviderCache(logger, name, loaded.cachePath, fetched)
-		return fetchedSubscription, nil
-	default:
-		return subscriptionFile{}, providerContentUnavailable{err: err}
-	}
+	return subscriptionFile{}, providerContentUnavailable{err: E.Cause(err, "cached content is unusable")}
 }
 
 func parseNonEmptySubscription(content []byte) (subscriptionFile, error) {
@@ -761,70 +874,59 @@ func loadProviderContent(ctx context.Context, logger log.ContextLogger, name str
 			cachePath = filepath.Join("proxy_providers", safeFileName(name)+".yaml")
 		}
 		cachePath = filemanager.BasePath(ctx, cachePath)
-		if provider.Interval > 0 {
-			if stat, err := os.Stat(cachePath); err == nil && time.Since(stat.ModTime()) < time.Duration(provider.Interval)*time.Second {
-				if cached, readErr := os.ReadFile(cachePath); readErr == nil {
-					return providerContent{content: cached, cachePath: cachePath, source: providerContentSourceCache}, nil
-				} else {
-					logger.Warn("read fresh proxy-provider ", name, " cache: ", readErr)
+		// Expansion runs during config validation and box construction. It must stay
+		// offline: stale cache is still the last known good snapshot and refreshing
+		// it is owned by the runtime provider manager after the core has started.
+		cached, err := os.ReadFile(cachePath)
+		if err != nil {
+			return providerContent{}, providerContentUnavailable{err: E.Cause(err, "read cache")}
+		}
+		var modTime time.Time
+		if stat, statErr := os.Stat(cachePath); statErr == nil {
+			modTime = stat.ModTime()
+		}
+		var metadata providerCacheMetadata
+		if metadataContent, metadataErr := os.ReadFile(providerMetadataPath(cachePath)); metadataErr == nil {
+			if stdjson.Unmarshal(metadataContent, &metadata) == nil {
+				fingerprint := providerSourceFingerprint(provider)
+				if metadata.SourceFingerprint != "" && metadata.SourceFingerprint != fingerprint {
+					return providerContent{}, providerContentUnavailable{err: E.New("cached content belongs to a different provider source")}
+				}
+				if metadata.ContentSHA256 != "" && metadata.ContentSHA256 != contentSHA256(cached) {
+					metadata = providerCacheMetadata{}
+				} else if metadata.UpdatedAt.After(modTime) {
+					modTime = metadata.UpdatedAt
 				}
 			}
 		}
-		content, err := fetchProviderContent(ctx, provider)
-		if err != nil {
-			if cached, readErr := os.ReadFile(cachePath); readErr == nil {
-				logger.Warn("fetch proxy-provider ", name, " failed, using cached content: ", err)
-				return providerContent{content: cached, cachePath: cachePath, source: providerContentSourceCache}, nil
-			}
-			return providerContent{}, providerContentUnavailable{err: err}
-		}
-		return providerContent{content: content, cachePath: cachePath, source: providerContentSourceFetched}, nil
+		return providerContent{
+			content:     cached,
+			cachePath:   cachePath,
+			source:      providerContentSourceCache,
+			modTime:     modTime,
+			etag:        metadata.ETag,
+			modified:    metadata.LastModified,
+			fingerprint: providerSourceFingerprint(provider),
+		}, nil
 	default:
 		return providerContent{}, E.New("unsupported provider type: ", provider.Type)
 	}
 }
 
-func fetchProviderContent(ctx context.Context, provider option.ProxyProvider) ([]byte, error) {
-	providerProxy := strings.TrimSpace(provider.Proxy)
-	if providerProxy != "" && !isDirectProviderProxy(providerProxy) {
-		return nil, E.New("proxy-provider proxy detour is not supported yet: ", providerProxy)
-	}
-	return fetchProvider(ctx, provider)
+func providerSourceFingerprint(provider option.ProxyProvider) string {
+	encoded, _ := stdjson.Marshal(struct {
+		URL    string `json:"url"`
+		Header any    `json:"header,omitempty"`
+	}{
+		URL:    provider.URL,
+		Header: provider.Header,
+	})
+	return contentSHA256(encoded)
 }
 
-func fetchProvider(ctx context.Context, provider option.ProxyProvider) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, provider.URL, nil)
-	if err != nil {
-		return nil, err
-	}
-	for name, values := range provider.Header {
-		for _, value := range values {
-			request.Header.Add(name, value)
-		}
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, E.New("unexpected status: ", response.Status)
-	}
-	return readAllLimited(response.Body, 16<<20)
-}
-
-func saveProviderCache(logger log.ContextLogger, name string, cachePath string, content []byte) {
-	if cachePath == "" {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
-		if writeErr := os.WriteFile(cachePath, content, 0o644); writeErr != nil {
-			logger.Warn("save proxy-provider ", name, " cache: ", writeErr)
-		}
-	} else {
-		logger.Warn("create proxy-provider ", name, " cache directory: ", err)
-	}
+func contentSHA256(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 func compileProviderFilter(pattern string) ([]*regexp.Regexp, error) {

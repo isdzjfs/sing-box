@@ -3,6 +3,8 @@ package group
 import (
 	"context"
 	"net"
+	"slices"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -36,6 +38,7 @@ type Selector struct {
 	outbound                     adapter.OutboundManager
 	connection                   adapter.ConnectionManager
 	logger                       logger.ContextLogger
+	access                       sync.RWMutex
 	tags                         []string
 	icon                         string
 	defaultTag                   string
@@ -76,6 +79,8 @@ func (s *Selector) Network() []string {
 }
 
 func (s *Selector) Start() error {
+	s.access.Lock()
+	defer s.access.Unlock()
 	for i, tag := range s.tags {
 		detour, loaded := s.outbound.Outbound(tag)
 		if !loaded {
@@ -116,6 +121,8 @@ func (s *Selector) Start() error {
 func (s *Selector) Now() string {
 	selected := s.selected.Load()
 	if selected == nil {
+		s.access.RLock()
+		defer s.access.RUnlock()
 		if len(s.tags) == 0 {
 			return ""
 		}
@@ -125,7 +132,13 @@ func (s *Selector) Now() string {
 }
 
 func (s *Selector) All() []string {
-	return s.tags
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return slices.Clone(s.tags)
+}
+
+func (s *Selector) Dependencies() []string {
+	return s.All()
 }
 
 func (s *Selector) Icon() string {
@@ -137,11 +150,15 @@ func (s *Selector) InterruptsExternalConnections() bool {
 }
 
 func (s *Selector) SelectOutbound(tag string) bool {
+	s.access.RLock()
 	detour, loaded := s.outbounds[tag]
 	if !loaded {
+		s.access.RUnlock()
 		return false
 	}
-	if s.selected.Swap(detour) == detour {
+	unchanged := s.selected.Swap(detour) == detour
+	s.access.RUnlock()
+	if unchanged {
 		return true
 	}
 	if s.Tag() != "" {
@@ -158,6 +175,52 @@ func (s *Selector) SelectOutbound(tag string) bool {
 		s.history.NotifyUpdated()
 	}
 	return true
+}
+
+func (s *Selector) UpdateOutbounds(tags []string) error {
+	outbounds := make(map[string]adapter.Outbound, len(tags))
+	for i, tag := range tags {
+		detour, loaded := s.outbound.Outbound(tag)
+		if !loaded {
+			return E.New("outbound ", i, " not found: ", tag)
+		}
+		outbounds[tag] = detour
+	}
+
+	s.access.Lock()
+	previous := s.selected.Load()
+	previousTag := ""
+	if previous != nil {
+		previousTag = previous.Tag()
+	}
+	var selected adapter.Outbound
+	if previousTag != "" {
+		selected = outbounds[previousTag]
+	}
+	if selected == nil && s.Tag() != "" {
+		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+		if cacheFile != nil {
+			selected = outbounds[cacheFile.LoadSelected(s.Tag())]
+		}
+	}
+	if selected == nil && s.defaultTag != "" {
+		selected = outbounds[s.defaultTag]
+	}
+	if selected == nil && len(tags) > 0 {
+		selected = outbounds[tags[0]]
+	}
+
+	s.tags = slices.Clone(tags)
+	s.outbounds = outbounds
+	selectionChanged := s.selected.Swap(selected) != selected
+	s.access.Unlock()
+	if selectionChanged {
+		s.interruptGroup.Interrupt(s.interruptExternalConnections)
+	}
+	if s.history != nil {
+		s.history.NotifyUpdated()
+	}
+	return nil
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {

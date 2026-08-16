@@ -66,6 +66,8 @@ type OutboundGroupItem struct {
 	Type         string
 	URLTestTime  int64
 	URLTestDelay int32
+	Server       string
+	ServerPort   int32
 }
 
 type OutboundGroupItemIterator interface {
@@ -349,6 +351,8 @@ func outboundGroupIteratorFromGRPC(groups *daemon.Groups) OutboundGroupIterator 
 				Type:         item.Type,
 				URLTestTime:  item.UrlTestTime,
 				URLTestDelay: item.UrlTestDelay,
+				Server:       item.Server,
+				ServerPort:   item.ServerPort,
 			})
 		}
 		libboxGroups = append(libboxGroups, libboxGroup)
@@ -367,6 +371,8 @@ func outboundGroupItemListFromGRPC(list *daemon.OutboundList) OutboundGroupItemI
 			Type:         ob.Type,
 			URLTestTime:  ob.UrlTestTime,
 			URLTestDelay: ob.UrlTestDelay,
+			Server:       ob.Server,
+			ServerPort:   ob.ServerPort,
 		})
 	}
 	return newIterator(items)

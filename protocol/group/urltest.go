@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +64,7 @@ type URLTest struct {
 	outbound                     adapter.OutboundManager
 	connection                   adapter.ConnectionManager
 	logger                       log.ContextLogger
+	tagsAccess                   sync.RWMutex
 	tags                         []string
 	icon                         string
 	link                         string
@@ -92,8 +94,11 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 }
 
 func (s *URLTest) Start() error {
-	outbounds := make([]adapter.Outbound, 0, len(s.tags))
-	for i, tag := range s.tags {
+	s.tagsAccess.RLock()
+	tags := slices.Clone(s.tags)
+	s.tagsAccess.RUnlock()
+	outbounds := make([]adapter.Outbound, 0, len(tags))
+	for i, tag := range tags {
 		detour, loaded := s.outbound.Outbound(tag)
 		if !loaded {
 			return E.New("outbound ", i, " not found: ", tag)
@@ -120,6 +125,9 @@ func (s *URLTest) Close() error {
 }
 
 func (s *URLTest) Now() string {
+	if s.group == nil {
+		return ""
+	}
 	if selected := s.group.selectedOutbound(N.NetworkTCP).outbound; selected != nil {
 		return selected.Tag()
 	}
@@ -130,7 +138,13 @@ func (s *URLTest) Now() string {
 }
 
 func (s *URLTest) All() []string {
-	return s.tags
+	s.tagsAccess.RLock()
+	defer s.tagsAccess.RUnlock()
+	return slices.Clone(s.tags)
+}
+
+func (s *URLTest) Dependencies() []string {
+	return s.All()
 }
 
 func (s *URLTest) Icon() string {
@@ -163,6 +177,24 @@ func (s *URLTest) InterfaceUpdated() {
 		return
 	}
 	go group.CheckOutbounds(true)
+}
+
+func (s *URLTest) UpdateOutbounds(tags []string) error {
+	outbounds := make([]adapter.Outbound, 0, len(tags))
+	for i, tag := range tags {
+		detour, loaded := s.outbound.Outbound(tag)
+		if !loaded {
+			return E.New("outbound ", i, " not found: ", tag)
+		}
+		outbounds = append(outbounds, detour)
+	}
+	s.tagsAccess.Lock()
+	s.tags = slices.Clone(tags)
+	s.tagsAccess.Unlock()
+	if s.group != nil {
+		s.group.UpdateOutbounds(outbounds)
+	}
+	return nil
 }
 
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -266,6 +298,7 @@ type URLTestGroup struct {
 	pause                        pause.Manager
 	pauseCallback                *list.Element[pause.Callback]
 	logger                       log.Logger
+	membersAccess                sync.RWMutex
 	outbounds                    []adapter.Outbound
 	link                         string
 	interval                     time.Duration
@@ -386,6 +419,7 @@ func (g *URLTestGroup) Close() error {
 }
 
 func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+	outbounds := g.outboundsSnapshot()
 	var minDelay uint16
 	var minOutbound adapter.Outbound
 	switch network {
@@ -404,7 +438,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 			}
 		}
 	}
-	for _, detour := range g.outbounds {
+	for _, detour := range outbounds {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
@@ -418,7 +452,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		}
 	}
 	if minOutbound == nil {
-		for _, detour := range g.outbounds {
+		for _, detour := range outbounds {
 			if !common.Contains(detour.Network(), network) {
 				continue
 			}
@@ -427,6 +461,54 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		return nil, false
 	}
 	return minOutbound, true
+}
+
+func (g *URLTestGroup) outboundsSnapshot() []adapter.Outbound {
+	g.membersAccess.RLock()
+	defer g.membersAccess.RUnlock()
+	return slices.Clone(g.outbounds)
+}
+
+func (g *URLTestGroup) UpdateOutbounds(outbounds []adapter.Outbound) {
+	g.membersAccess.Lock()
+	g.outbounds = slices.Clone(outbounds)
+	g.membersAccess.Unlock()
+
+	available := make(map[adapter.Outbound]bool, len(outbounds))
+	for _, item := range outbounds {
+		available[item] = true
+	}
+	var updated bool
+	g.selectedAccess.Lock()
+	if g.selectedOutboundTCP != nil && !available[g.selectedOutboundTCP] {
+		g.selectedOutboundTCP = nil
+		if g.tcpGenerationCancel != nil {
+			g.tcpGenerationCancel()
+		}
+		g.tcpGeneration++
+		g.tcpGenerationCtx, g.tcpGenerationCancel = context.WithCancel(g.ctx)
+		updated = true
+	}
+	if g.selectedOutboundUDP != nil && !available[g.selectedOutboundUDP] {
+		g.selectedOutboundUDP = nil
+		if g.udpGenerationCancel != nil {
+			g.udpGenerationCancel()
+		}
+		g.udpGeneration++
+		g.udpGenerationCtx, g.udpGenerationCancel = context.WithCancel(g.ctx)
+		updated = true
+	}
+	if updated {
+		g.connectionGeneration++
+	}
+	generation := g.connectionGeneration
+	g.selectedAccess.Unlock()
+	if updated {
+		g.interruptGroup.InterruptBefore(generation, g.interruptExternalConnections)
+	}
+	g.performUpdateCheck()
+	g.history.NotifyUpdated()
+	go g.CheckOutbounds(true)
 }
 
 func (g *URLTestGroup) selectedOutbound(network string) urlTestOutboundSnapshot {
@@ -555,7 +637,7 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.T
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
 	checked := make(map[string]bool)
 	var resultAccess sync.Mutex
-	for _, detour := range g.outbounds {
+	for _, detour := range g.outboundsSnapshot() {
 		tag := detour.Tag()
 		realTag := RealTag(detour)
 		if checked[realTag] {
