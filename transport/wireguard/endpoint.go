@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/service/powerreport"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -172,6 +173,17 @@ func (e *Endpoint) Start(postStart bool) error {
 		for _, peer := range e.peers {
 			if peer.endpoint.IsValid() && peer.reserved != [3]uint8{} {
 				bind.SetReservedForEndpoint(peer.endpoint, peer.reserved)
+			}
+		}
+	}
+	powerManager := service.FromContext[*powerreport.Manager](e.options.Context)
+	if powerManager != nil {
+		recorder := powerManager.Recorder()
+		if recorder != nil {
+			bind = &powerReportBind{
+				Bind:        bind,
+				recorder:    recorder,
+				attribution: &powerreport.Attribution{Endpoint: e.options.Tag},
 			}
 		}
 	}
