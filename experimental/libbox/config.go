@@ -206,7 +206,7 @@ func (s *platformInterfaceStub) UsePlatformWIFIMonitor() bool {
 	return false
 }
 
-func (s *platformInterfaceStub) ReadWIFIState() adapter.WIFIState {
+func (s *platformInterfaceStub) ReadWIFIState(ctx context.Context) adapter.WIFIState {
 	return adapter.WIFIState{}
 }
 
@@ -223,6 +223,10 @@ func (s *platformInterfaceStub) UsePlatformNotification() bool {
 }
 
 func (s *platformInterfaceStub) SendNotification(notification *adapter.Notification) error {
+	return nil
+}
+
+func (s *platformInterfaceStub) CancelNotification(identifier string, typeID int32) error {
 	return nil
 }
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagernet/sing-box/internal/winmutex"
+	"github.com/sagernet/sing-box/common/winmutex"
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"github.com/stretchr/testify/require"
@@ -28,6 +28,13 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+func skipIfWinDivertUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Skipf("WinDivert integration test requires Administrator privileges: %v", err)
+	}
+}
+
 func openHandle(t *testing.T, filter *Filter, flags Flag) *Handle {
 	t.Helper()
 	h, err := Open(filter, LayerNetwork, 0, flags)
@@ -36,16 +43,6 @@ func openHandle(t *testing.T, filter *Filter, flags Flag) *Handle {
 	return h
 }
 
-func skipIfWinDivertUnavailable(t *testing.T, err error) {
-	t.Helper()
-	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		t.Skipf("WinDivert integration test requires Administrator privileges: %v", err)
-	}
-}
-
-// A send-only handle installs+opens the driver but does not attach a
-// receive filter, so it exercises the full driver-install path without
-// diverting any live traffic on the host.
 func TestIntegrationOpenSendOnly(t *testing.T) {
 	h := openHandle(t, nil, FlagSendOnly)
 	require.NoError(t, h.Close())
@@ -128,27 +125,24 @@ func stopDriver(t *testing.T) {
 }
 
 func TestIntegrationConcurrentOpen(t *testing.T) {
-	resultCh := make(chan struct {
-		handle *Handle
-		err    error
-	}, 2)
 	stopDriver(t)
 	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	handles := make(chan *Handle, 2)
 	for range 2 {
 		go func() {
 			<-start
 			h, err := Open(nil, LayerNetwork, 0, FlagSendOnly)
-			resultCh <- struct {
-				handle *Handle
-				err    error
-			}{h, err}
+			handles <- h
+			errCh <- err
 		}()
 	}
 	close(start)
 	for range 2 {
-		result := <-resultCh
-		skipIfWinDivertUnavailable(t, result.err)
-		require.NoError(t, result.err)
-		require.NoError(t, result.handle.Close())
+		err := <-errCh
+		h := <-handles
+		skipIfWinDivertUnavailable(t, err)
+		require.NoError(t, err)
+		require.NoError(t, h.Close())
 	}
 }

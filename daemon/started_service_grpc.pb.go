@@ -2,7 +2,6 @@ package daemon
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -42,6 +41,12 @@ const (
 	StartedService_SetTailscaleExitNode_FullMethodName           = "/daemon.StartedService/SetTailscaleExitNode"
 	StartedService_TailscaleLogout_FullMethodName                = "/daemon.StartedService/TailscaleLogout"
 	StartedService_StartTailscaleSSHSession_FullMethodName       = "/daemon.StartedService/StartTailscaleSSHSession"
+	StartedService_SubscribeTaildropInbox_FullMethodName         = "/daemon.StartedService/SubscribeTaildropInbox"
+	StartedService_MarkTaildropInboxRead_FullMethodName          = "/daemon.StartedService/MarkTaildropInboxRead"
+	StartedService_SendTaildropFiles_FullMethodName              = "/daemon.StartedService/SendTaildropFiles"
+	StartedService_DownloadTaildropFile_FullMethodName           = "/daemon.StartedService/DownloadTaildropFile"
+	StartedService_DeleteTaildropFile_FullMethodName             = "/daemon.StartedService/DeleteTaildropFile"
+	StartedService_CancelTaildropReceiving_FullMethodName        = "/daemon.StartedService/CancelTaildropReceiving"
 	StartedService_ProvideUSBDevices_FullMethodName              = "/daemon.StartedService/ProvideUSBDevices"
 	StartedService_SubscribeUSBIPServerStatus_FullMethodName     = "/daemon.StartedService/SubscribeUSBIPServerStatus"
 	StartedService_SubscribeOpenConnectStatus_FullMethodName     = "/daemon.StartedService/SubscribeOpenConnectStatus"
@@ -50,6 +55,7 @@ const (
 	StartedService_SubscribeOpenVPNStatus_FullMethodName         = "/daemon.StartedService/SubscribeOpenVPNStatus"
 	StartedService_SubmitOpenVPNChallengeResponse_FullMethodName = "/daemon.StartedService/SubmitOpenVPNChallengeResponse"
 	StartedService_CancelOpenVPNChallenge_FullMethodName         = "/daemon.StartedService/CancelOpenVPNChallenge"
+	StartedService_SubscribeNotifications_FullMethodName         = "/daemon.StartedService/SubscribeNotifications"
 )
 
 // StartedServiceClient is the client API for StartedService service.
@@ -83,6 +89,12 @@ type StartedServiceClient interface {
 	SetTailscaleExitNode(ctx context.Context, in *SetTailscaleExitNodeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	TailscaleLogout(ctx context.Context, in *TailscaleLogoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	StartTailscaleSSHSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TailscaleSSHClientMessage, TailscaleSSHServerMessage], error)
+	SubscribeTaildropInbox(ctx context.Context, in *SubscribeTaildropInboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaildropInbox], error)
+	MarkTaildropInboxRead(ctx context.Context, in *MarkTaildropInboxReadRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	SendTaildropFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TaildropSendClientMessage, TaildropSendServerMessage], error)
+	DownloadTaildropFile(ctx context.Context, in *DownloadTaildropFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DownloadTaildropFileChunk], error)
+	DeleteTaildropFile(ctx context.Context, in *DeleteTaildropFileRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	CancelTaildropReceiving(ctx context.Context, in *CancelTaildropReceivingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ProvideUSBDevices(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[USBProviderMessage, USBServerMessage], error)
 	SubscribeUSBIPServerStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[USBIPServerStatusUpdate], error)
 	SubscribeOpenConnectStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenConnectStatusUpdate], error)
@@ -91,6 +103,7 @@ type StartedServiceClient interface {
 	SubscribeOpenVPNStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenVPNStatusUpdate], error)
 	SubmitOpenVPNChallengeResponse(ctx context.Context, in *OpenVPNChallengeSubmission, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	CancelOpenVPNChallenge(ctx context.Context, in *OpenVPNChallengeCancel, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	SubscribeNotifications(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[NotificationEvent], error)
 }
 
 type startedServiceClient struct {
@@ -473,9 +486,90 @@ func (c *startedServiceClient) StartTailscaleSSHSession(ctx context.Context, opt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StartedService_StartTailscaleSSHSessionClient = grpc.BidiStreamingClient[TailscaleSSHClientMessage, TailscaleSSHServerMessage]
 
+func (c *startedServiceClient) SubscribeTaildropInbox(ctx context.Context, in *SubscribeTaildropInboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaildropInbox], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[12], StartedService_SubscribeTaildropInbox_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeTaildropInboxRequest, TaildropInbox]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SubscribeTaildropInboxClient = grpc.ServerStreamingClient[TaildropInbox]
+
+func (c *startedServiceClient) MarkTaildropInboxRead(ctx context.Context, in *MarkTaildropInboxReadRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, StartedService_MarkTaildropInboxRead_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) SendTaildropFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TaildropSendClientMessage, TaildropSendServerMessage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[13], StartedService_SendTaildropFiles_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TaildropSendClientMessage, TaildropSendServerMessage]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SendTaildropFilesClient = grpc.BidiStreamingClient[TaildropSendClientMessage, TaildropSendServerMessage]
+
+func (c *startedServiceClient) DownloadTaildropFile(ctx context.Context, in *DownloadTaildropFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DownloadTaildropFileChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[14], StartedService_DownloadTaildropFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DownloadTaildropFileRequest, DownloadTaildropFileChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_DownloadTaildropFileClient = grpc.ServerStreamingClient[DownloadTaildropFileChunk]
+
+func (c *startedServiceClient) DeleteTaildropFile(ctx context.Context, in *DeleteTaildropFileRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, StartedService_DeleteTaildropFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) CancelTaildropReceiving(ctx context.Context, in *CancelTaildropReceivingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, StartedService_CancelTaildropReceiving_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *startedServiceClient) ProvideUSBDevices(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[USBProviderMessage, USBServerMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[12], StartedService_ProvideUSBDevices_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[15], StartedService_ProvideUSBDevices_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +582,7 @@ type StartedService_ProvideUSBDevicesClient = grpc.BidiStreamingClient[USBProvid
 
 func (c *startedServiceClient) SubscribeUSBIPServerStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[USBIPServerStatusUpdate], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[13], StartedService_SubscribeUSBIPServerStatus_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[16], StartedService_SubscribeUSBIPServerStatus_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +601,7 @@ type StartedService_SubscribeUSBIPServerStatusClient = grpc.ServerStreamingClien
 
 func (c *startedServiceClient) SubscribeOpenConnectStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenConnectStatusUpdate], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[14], StartedService_SubscribeOpenConnectStatus_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[17], StartedService_SubscribeOpenConnectStatus_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +640,7 @@ func (c *startedServiceClient) CancelOpenConnectAuthChallenge(ctx context.Contex
 
 func (c *startedServiceClient) SubscribeOpenVPNStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OpenVPNStatusUpdate], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[15], StartedService_SubscribeOpenVPNStatus_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[18], StartedService_SubscribeOpenVPNStatus_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -583,6 +677,25 @@ func (c *startedServiceClient) CancelOpenVPNChallenge(ctx context.Context, in *O
 	return out, nil
 }
 
+func (c *startedServiceClient) SubscribeNotifications(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[NotificationEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[19], StartedService_SubscribeNotifications_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[emptypb.Empty, NotificationEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SubscribeNotificationsClient = grpc.ServerStreamingClient[NotificationEvent]
+
 // StartedServiceServer is the server API for StartedService service.
 // All implementations must embed UnimplementedStartedServiceServer
 // for forward compatibility.
@@ -614,6 +727,12 @@ type StartedServiceServer interface {
 	SetTailscaleExitNode(context.Context, *SetTailscaleExitNodeRequest) (*emptypb.Empty, error)
 	TailscaleLogout(context.Context, *TailscaleLogoutRequest) (*emptypb.Empty, error)
 	StartTailscaleSSHSession(grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]) error
+	SubscribeTaildropInbox(*SubscribeTaildropInboxRequest, grpc.ServerStreamingServer[TaildropInbox]) error
+	MarkTaildropInboxRead(context.Context, *MarkTaildropInboxReadRequest) (*emptypb.Empty, error)
+	SendTaildropFiles(grpc.BidiStreamingServer[TaildropSendClientMessage, TaildropSendServerMessage]) error
+	DownloadTaildropFile(*DownloadTaildropFileRequest, grpc.ServerStreamingServer[DownloadTaildropFileChunk]) error
+	DeleteTaildropFile(context.Context, *DeleteTaildropFileRequest) (*emptypb.Empty, error)
+	CancelTaildropReceiving(context.Context, *CancelTaildropReceivingRequest) (*emptypb.Empty, error)
 	ProvideUSBDevices(grpc.BidiStreamingServer[USBProviderMessage, USBServerMessage]) error
 	SubscribeUSBIPServerStatus(*emptypb.Empty, grpc.ServerStreamingServer[USBIPServerStatusUpdate]) error
 	SubscribeOpenConnectStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenConnectStatusUpdate]) error
@@ -622,6 +741,7 @@ type StartedServiceServer interface {
 	SubscribeOpenVPNStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenVPNStatusUpdate]) error
 	SubmitOpenVPNChallengeResponse(context.Context, *OpenVPNChallengeSubmission) (*emptypb.Empty, error)
 	CancelOpenVPNChallenge(context.Context, *OpenVPNChallengeCancel) (*emptypb.Empty, error)
+	SubscribeNotifications(*emptypb.Empty, grpc.ServerStreamingServer[NotificationEvent]) error
 	mustEmbedUnimplementedStartedServiceServer()
 }
 
@@ -635,141 +755,128 @@ type UnimplementedStartedServiceServer struct{}
 func (UnimplementedStartedServiceServer) GetVersion(context.Context, *emptypb.Empty) (*Version, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVersion not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeServiceStatus(*emptypb.Empty, grpc.ServerStreamingServer[ServiceStatus]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeServiceStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeLog(*emptypb.Empty, grpc.ServerStreamingServer[Log]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeLog not implemented")
 }
-
 func (UnimplementedStartedServiceServer) GetDefaultLogLevel(context.Context, *emptypb.Empty) (*DefaultLogLevel, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDefaultLogLevel not implemented")
 }
-
 func (UnimplementedStartedServiceServer) ClearLogs(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClearLogs not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeStatus(*SubscribeStatusRequest, grpc.ServerStreamingServer[Status]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeGroups(*emptypb.Empty, grpc.ServerStreamingServer[Groups]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGroups not implemented")
 }
-
 func (UnimplementedStartedServiceServer) GetClashModeStatus(context.Context, *emptypb.Empty) (*ClashModeStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetClashModeStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeClashMode(*emptypb.Empty, grpc.ServerStreamingServer[ClashMode]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeClashMode not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SetClashMode(context.Context, *ClashMode) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClashMode not implemented")
 }
-
 func (UnimplementedStartedServiceServer) URLTest(context.Context, *URLTestRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method URLTest not implemented")
 }
-
 func (UnimplementedStartedServiceServer) URLTestItemsV2(context.Context, *URLTestItemsV2Request) (*URLTestItemsV2Response, error) {
 	return nil, status.Error(codes.Unimplemented, "method URLTestItemsV2 not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SelectOutbound(context.Context, *SelectOutboundRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SelectOutbound not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SetGroupExpand(context.Context, *SetGroupExpandRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetGroupExpand not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeConnections(*SubscribeConnectionsRequest, grpc.ServerStreamingServer[ConnectionEvents]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeConnections not implemented")
 }
-
 func (UnimplementedStartedServiceServer) CloseConnection(context.Context, *CloseConnectionRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CloseConnection not implemented")
 }
-
 func (UnimplementedStartedServiceServer) CloseAllConnections(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CloseAllConnections not implemented")
 }
-
 func (UnimplementedStartedServiceServer) GetDeprecatedWarnings(context.Context, *emptypb.Empty) (*DeprecatedWarnings, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDeprecatedWarnings not implemented")
 }
-
 func (UnimplementedStartedServiceServer) GetStartedAt(context.Context, *emptypb.Empty) (*StartedAt, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStartedAt not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeOutbounds(*emptypb.Empty, grpc.ServerStreamingServer[OutboundList]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeOutbounds not implemented")
 }
-
 func (UnimplementedStartedServiceServer) StartNetworkQualityTest(*NetworkQualityTestRequest, grpc.ServerStreamingServer[NetworkQualityTestProgress]) error {
 	return status.Error(codes.Unimplemented, "method StartNetworkQualityTest not implemented")
 }
-
 func (UnimplementedStartedServiceServer) StartSTUNTest(*STUNTestRequest, grpc.ServerStreamingServer[STUNTestProgress]) error {
 	return status.Error(codes.Unimplemented, "method StartSTUNTest not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeTailscaleStatus(*emptypb.Empty, grpc.ServerStreamingServer[TailscaleStatusUpdate]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeTailscaleStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) StartTailscalePing(*TailscalePingRequest, grpc.ServerStreamingServer[TailscalePingResponse]) error {
 	return status.Error(codes.Unimplemented, "method StartTailscalePing not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SetTailscaleExitNode(context.Context, *SetTailscaleExitNodeRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetTailscaleExitNode not implemented")
 }
-
 func (UnimplementedStartedServiceServer) TailscaleLogout(context.Context, *TailscaleLogoutRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TailscaleLogout not implemented")
 }
-
 func (UnimplementedStartedServiceServer) StartTailscaleSSHSession(grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]) error {
 	return status.Error(codes.Unimplemented, "method StartTailscaleSSHSession not implemented")
 }
-
+func (UnimplementedStartedServiceServer) SubscribeTaildropInbox(*SubscribeTaildropInboxRequest, grpc.ServerStreamingServer[TaildropInbox]) error {
+	return status.Error(codes.Unimplemented, "method SubscribeTaildropInbox not implemented")
+}
+func (UnimplementedStartedServiceServer) MarkTaildropInboxRead(context.Context, *MarkTaildropInboxReadRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method MarkTaildropInboxRead not implemented")
+}
+func (UnimplementedStartedServiceServer) SendTaildropFiles(grpc.BidiStreamingServer[TaildropSendClientMessage, TaildropSendServerMessage]) error {
+	return status.Error(codes.Unimplemented, "method SendTaildropFiles not implemented")
+}
+func (UnimplementedStartedServiceServer) DownloadTaildropFile(*DownloadTaildropFileRequest, grpc.ServerStreamingServer[DownloadTaildropFileChunk]) error {
+	return status.Error(codes.Unimplemented, "method DownloadTaildropFile not implemented")
+}
+func (UnimplementedStartedServiceServer) DeleteTaildropFile(context.Context, *DeleteTaildropFileRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteTaildropFile not implemented")
+}
+func (UnimplementedStartedServiceServer) CancelTaildropReceiving(context.Context, *CancelTaildropReceivingRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelTaildropReceiving not implemented")
+}
 func (UnimplementedStartedServiceServer) ProvideUSBDevices(grpc.BidiStreamingServer[USBProviderMessage, USBServerMessage]) error {
 	return status.Error(codes.Unimplemented, "method ProvideUSBDevices not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeUSBIPServerStatus(*emptypb.Empty, grpc.ServerStreamingServer[USBIPServerStatusUpdate]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeUSBIPServerStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeOpenConnectStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenConnectStatusUpdate]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeOpenConnectStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubmitOpenConnectAuthResponse(context.Context, *OpenConnectAuthResponseSubmission) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SubmitOpenConnectAuthResponse not implemented")
 }
-
 func (UnimplementedStartedServiceServer) CancelOpenConnectAuthChallenge(context.Context, *OpenConnectAuthChallengeCancel) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelOpenConnectAuthChallenge not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubscribeOpenVPNStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenVPNStatusUpdate]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeOpenVPNStatus not implemented")
 }
-
 func (UnimplementedStartedServiceServer) SubmitOpenVPNChallengeResponse(context.Context, *OpenVPNChallengeSubmission) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SubmitOpenVPNChallengeResponse not implemented")
 }
-
 func (UnimplementedStartedServiceServer) CancelOpenVPNChallenge(context.Context, *OpenVPNChallengeCancel) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelOpenVPNChallenge not implemented")
+}
+func (UnimplementedStartedServiceServer) SubscribeNotifications(*emptypb.Empty, grpc.ServerStreamingServer[NotificationEvent]) error {
+	return status.Error(codes.Unimplemented, "method SubscribeNotifications not implemented")
 }
 func (UnimplementedStartedServiceServer) mustEmbedUnimplementedStartedServiceServer() {}
 func (UnimplementedStartedServiceServer) testEmbeddedByValue()                        {}
@@ -1190,6 +1297,89 @@ func _StartedService_StartTailscaleSSHSession_Handler(srv interface{}, stream gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StartedService_StartTailscaleSSHSessionServer = grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]
 
+func _StartedService_SubscribeTaildropInbox_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeTaildropInboxRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StartedServiceServer).SubscribeTaildropInbox(m, &grpc.GenericServerStream[SubscribeTaildropInboxRequest, TaildropInbox]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SubscribeTaildropInboxServer = grpc.ServerStreamingServer[TaildropInbox]
+
+func _StartedService_MarkTaildropInboxRead_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkTaildropInboxReadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).MarkTaildropInboxRead(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_MarkTaildropInboxRead_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).MarkTaildropInboxRead(ctx, req.(*MarkTaildropInboxReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_SendTaildropFiles_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(StartedServiceServer).SendTaildropFiles(&grpc.GenericServerStream[TaildropSendClientMessage, TaildropSendServerMessage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SendTaildropFilesServer = grpc.BidiStreamingServer[TaildropSendClientMessage, TaildropSendServerMessage]
+
+func _StartedService_DownloadTaildropFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DownloadTaildropFileRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StartedServiceServer).DownloadTaildropFile(m, &grpc.GenericServerStream[DownloadTaildropFileRequest, DownloadTaildropFileChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_DownloadTaildropFileServer = grpc.ServerStreamingServer[DownloadTaildropFileChunk]
+
+func _StartedService_DeleteTaildropFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTaildropFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).DeleteTaildropFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_DeleteTaildropFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).DeleteTaildropFile(ctx, req.(*DeleteTaildropFileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_CancelTaildropReceiving_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelTaildropReceivingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).CancelTaildropReceiving(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_CancelTaildropReceiving_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).CancelTaildropReceiving(ctx, req.(*CancelTaildropReceivingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StartedService_ProvideUSBDevices_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(StartedServiceServer).ProvideUSBDevices(&grpc.GenericServerStream[USBProviderMessage, USBServerMessage]{ServerStream: stream})
 }
@@ -1302,6 +1492,17 @@ func _StartedService_CancelOpenVPNChallenge_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StartedService_SubscribeNotifications_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(emptypb.Empty)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StartedServiceServer).SubscribeNotifications(m, &grpc.GenericServerStream[emptypb.Empty, NotificationEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_SubscribeNotificationsServer = grpc.ServerStreamingServer[NotificationEvent]
+
 // StartedService_ServiceDesc is the grpc.ServiceDesc for StartedService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1368,6 +1569,18 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TailscaleLogout",
 			Handler:    _StartedService_TailscaleLogout_Handler,
+		},
+		{
+			MethodName: "MarkTaildropInboxRead",
+			Handler:    _StartedService_MarkTaildropInboxRead_Handler,
+		},
+		{
+			MethodName: "DeleteTaildropFile",
+			Handler:    _StartedService_DeleteTaildropFile_Handler,
+		},
+		{
+			MethodName: "CancelTaildropReceiving",
+			Handler:    _StartedService_CancelTaildropReceiving_Handler,
 		},
 		{
 			MethodName: "SubmitOpenConnectAuthResponse",
@@ -1449,6 +1662,22 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 		{
+			StreamName:    "SubscribeTaildropInbox",
+			Handler:       _StartedService_SubscribeTaildropInbox_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SendTaildropFiles",
+			Handler:       _StartedService_SendTaildropFiles_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "DownloadTaildropFile",
+			Handler:       _StartedService_DownloadTaildropFile_Handler,
+			ServerStreams: true,
+		},
+		{
 			StreamName:    "ProvideUSBDevices",
 			Handler:       _StartedService_ProvideUSBDevices_Handler,
 			ServerStreams: true,
@@ -1467,6 +1696,11 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SubscribeOpenVPNStatus",
 			Handler:       _StartedService_SubscribeOpenVPNStatus_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SubscribeNotifications",
+			Handler:       _StartedService_SubscribeNotifications_Handler,
 			ServerStreams: true,
 		},
 	},

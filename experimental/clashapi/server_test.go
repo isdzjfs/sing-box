@@ -1,12 +1,15 @@
 package clashapi
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestCloseConnectionsForModeSwitch(t *testing.T) {
 	trafficManager := new(testModeSwitchTrafficManager)
 	network := new(testModeSwitchNetwork)
 
-	closeConnectionsForModeSwitch(trafficManager, network)
+	closeConnectionsForModeSwitch(context.Background(), trafficManager, network)
 
 	if trafficManager.closeAllConnectionsCount != 1 {
 		t.Fatalf("expected CloseAllConnections to be called once, got %d", trafficManager.closeAllConnectionsCount)
@@ -19,7 +22,7 @@ func TestCloseConnectionsForModeSwitch(t *testing.T) {
 func TestCloseConnectionsForModeSwitchAllowsMissingNetwork(t *testing.T) {
 	trafficManager := new(testModeSwitchTrafficManager)
 
-	closeConnectionsForModeSwitch(trafficManager, nil)
+	closeConnectionsForModeSwitch(context.Background(), trafficManager, nil)
 
 	if trafficManager.closeAllConnectionsCount != 1 {
 		t.Fatalf("expected CloseAllConnections to be called once, got %d", trafficManager.closeAllConnectionsCount)
@@ -38,6 +41,6 @@ type testModeSwitchNetwork struct {
 	resetNetworkCount int
 }
 
-func (n *testModeSwitchNetwork) ResetNetwork() {
+func (n *testModeSwitchNetwork) ResetNetwork(context.Context) {
 	n.resetNetworkCount++
 }

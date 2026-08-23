@@ -232,7 +232,7 @@ func (s *Server) SetMode(newMode string) {
 		return
 	}
 	s.mode = newMode
-	closeConnectionsForModeSwitch(s.trafficManager, s.network)
+	closeConnectionsForModeSwitch(s.ctx, s.trafficManager, s.network)
 	s.modeUpdateAccess.Lock()
 	for _, hook := range s.modeUpdateHooks {
 		hook.Emit(struct{}{})
@@ -254,15 +254,15 @@ type allConnectionCloser interface {
 }
 
 type networkResetter interface {
-	ResetNetwork()
+	ResetNetwork(ctx context.Context)
 }
 
-func closeConnectionsForModeSwitch(trafficManager allConnectionCloser, network networkResetter) {
+func closeConnectionsForModeSwitch(ctx context.Context, trafficManager allConnectionCloser, network networkResetter) {
 	if trafficManager != nil {
 		trafficManager.CloseAllConnections()
 	}
 	if network != nil {
-		network.ResetNetwork()
+		network.ResetNetwork(ctx)
 	}
 }
 

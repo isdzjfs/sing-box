@@ -72,6 +72,7 @@ type URLTest struct {
 	tolerance                    uint16
 	idleTimeout                  time.Duration
 	group                        *URLTestGroup
+	checkAccess                  sync.Mutex
 	interruptExternalConnections bool
 }
 
@@ -168,7 +169,11 @@ func (s *URLTest) CheckOutbounds() {
 	s.group.CheckOutbounds(true)
 }
 
-func (s *URLTest) InterfaceUpdated() {
+func (s *URLTest) PerformUpdateCheck() {
+	s.group.performUpdateCheck()
+}
+
+func (s *URLTest) InterfaceUpdated(ctx context.Context) {
 	group := s.group
 	if group == nil {
 		return
@@ -176,7 +181,14 @@ func (s *URLTest) InterfaceUpdated() {
 	if group.pause.IsDevicePaused() || group.pause.IsNetworkPaused() {
 		return
 	}
-	go group.CheckOutbounds(true)
+	go func() {
+		s.checkAccess.Lock()
+		defer s.checkAccess.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		group.CheckOutbounds(true)
+	}()
 }
 
 func (s *URLTest) UpdateOutbounds(tags []string) error {
@@ -625,6 +637,11 @@ func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
 	return g.urlTest(ctx, false, time.Now())
 }
 
+type urlTestResult struct {
+	delay uint16
+	err   error
+}
+
 func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.Time) (map[string]uint16, error) {
 	result := make(map[string]uint16)
 	if g.checking.Swap(true) {
@@ -653,20 +670,30 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool, checkedAt time.T
 		}
 		b.Go(realTag, func() (any, error) {
 			defer g.history.FinishURLTest(realTag, checkedAt)
-			testCtx, cancel := context.WithTimeout(g.ctx, C.TCPTimeout)
+			testCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
 			defer cancel()
-			t, err := urltest.URLTest(testCtx, g.link, p)
-			if err != nil {
-				g.logger.Debug("outbound ", tag, " unavailable: ", err)
+			testChan := make(chan urlTestResult, 1)
+			go func() {
+				delay, testErr := urltest.URLTest(testCtx, g.link, p)
+				testChan <- urlTestResult{delay: delay, err: testErr}
+			}()
+			var testResult urlTestResult
+			select {
+			case testResult = <-testChan:
+			case <-testCtx.Done():
+				testResult.err = testCtx.Err()
+			}
+			if testResult.err != nil {
+				g.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
 				g.history.StoreURLTestFailure(realTag, checkedAt)
 			} else {
-				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
+				g.logger.Debug("outbound ", tag, " available: ", testResult.delay, "ms")
 				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
 					Time:  checkedAt,
-					Delay: t,
+					Delay: testResult.delay,
 				})
 				resultAccess.Lock()
-				result[tag] = t
+				result[tag] = testResult.delay
 				resultAccess.Unlock()
 			}
 			return nil, nil
