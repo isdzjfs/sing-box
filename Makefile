@@ -224,7 +224,7 @@ update_apple_version:
 	go run ./cmd/internal/update_apple_version
 
 update_macos_version:
-	MACOS_PROJECT_VERSION=$(shell go run -v ./cmd/internal/app_store_connect next_macos_project_version) go run ./cmd/internal/update_apple_version
+	MACOS_PROJECT_VERSION=$(shell go run -v ./cmd/internal/app_store_connect next_project_version macos) go run ./cmd/internal/update_apple_version
 
 release_apple: lib_apple update_apple_version release_ios release_macos release_tvos release_macos_standalone
 

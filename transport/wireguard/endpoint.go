@@ -153,6 +153,18 @@ func (e *Endpoint) Start(postStart bool) error {
 			e.egressPool = tun.NewUDPEgressPool(egressPoolOptions)
 			standardBind.SetEgressProvider(e.egressPool)
 		}
+		powerManager := service.FromContext[*powerreport.Manager](e.options.Context)
+		if powerManager != nil {
+			recorder := powerManager.Recorder()
+			if recorder != nil {
+				attribution := &powerreport.Attribution{Endpoint: e.options.Tag}
+				standardBind.SetIOActivityFuncs(func(size int) {
+					recorder.Touch(powerreport.DirectionInbound, size, attribution)
+				}, func(size int) {
+					recorder.Touch(powerreport.DirectionOutbound, size, attribution)
+				})
+			}
+		}
 		bind = standardBind
 	} else {
 		var (
@@ -173,17 +185,6 @@ func (e *Endpoint) Start(postStart bool) error {
 		for _, peer := range e.peers {
 			if peer.endpoint.IsValid() && peer.reserved != [3]uint8{} {
 				bind.SetReservedForEndpoint(peer.endpoint, peer.reserved)
-			}
-		}
-	}
-	powerManager := service.FromContext[*powerreport.Manager](e.options.Context)
-	if powerManager != nil {
-		recorder := powerManager.Recorder()
-		if recorder != nil {
-			bind = &powerReportBind{
-				Bind:        bind,
-				recorder:    recorder,
-				attribution: &powerreport.Attribution{Endpoint: e.options.Tag},
 			}
 		}
 	}

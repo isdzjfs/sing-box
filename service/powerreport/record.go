@@ -37,11 +37,8 @@ type timelineRow struct {
 	DiskBytesWritten            uint64            `json:"diskWriteBytes,omitempty"`
 	SleptMS                     int64             `json:"sleptMS,omitempty"`
 	Goroutines                  uint64            `json:"goroutines,omitempty"`
-	Packets                     uint64            `json:"packets,omitempty"`
-	Bytes                       uint64            `json:"bytes,omitempty"`
 	DNSQueries                  uint64            `json:"dnsQueries,omitempty"`
 	ConnectionsOpened           uint64            `json:"connectionsOpened,omitempty"`
-	ConnectionsClosed           uint64            `json:"connectionsClosed,omitempty"`
 	InterfacePackets            map[string]uint64 `json:"interfacePackets,omitempty"`
 	NetworkType                 string            `json:"network,omitempty"`
 }

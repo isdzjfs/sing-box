@@ -57,15 +57,18 @@ type Recorder struct {
 	sampleNano       int64
 	flushInterval    time.Duration
 	fallbackInterval time.Duration
+	baseTime         time.Time
 
+	_            [64]byte
 	lastActivity atomic.Int64
-	lastSampleAt atomic.Int64
+	_            [64]byte
 
-	packets           atomic.Uint64
-	trafficBytes      atomic.Uint64
+	lastSampleAt atomic.Int64
+	pendingBreak atomic.Pointer[breakRecord]
+	notify       chan struct{}
+
 	dnsQueries        atomic.Uint64
 	connectionsOpened atomic.Uint64
-	connectionsClosed atomic.Uint64
 
 	access         sync.Mutex
 	networkType    string
@@ -77,7 +80,16 @@ type Recorder struct {
 	closed         bool
 	metricsSamples []metrics.Sample
 
-	done chan struct{}
+	done       chan struct{}
+	workerDone chan struct{}
+}
+
+type breakRecord struct {
+	at        time.Time
+	idleMS    int64
+	direction Direction
+	size      int
+	by        *Attribution
 }
 
 type previousSample struct {
@@ -87,11 +99,8 @@ type previousSample struct {
 	absoluteTime      int64
 	continuousTime    int64
 	interfaces        map[string]interfaceCounters
-	packets           uint64
-	trafficBytes      uint64
 	dnsQueries        uint64
 	connectionsOpened uint64
-	connectionsClosed uint64
 }
 
 func NewRecorder(options Options) *Recorder {
@@ -125,11 +134,14 @@ func NewRecorder(options Options) *Recorder {
 		sampleNano:       int64(sampleInterval),
 		flushInterval:    flushInterval,
 		fallbackInterval: fallbackInterval,
+		baseTime:         time.Now(),
+		notify:           make(chan struct{}, 1),
 		metricsSamples: []metrics.Sample{
 			{Name: "/cpu/classes/gc/total:cpu-seconds"},
 			{Name: "/sched/goroutines:goroutines"},
 		},
-		done: make(chan struct{}),
+		done:       make(chan struct{}),
+		workerDone: make(chan struct{}),
 	}
 }
 
@@ -155,10 +167,10 @@ func (r *Recorder) Start() error {
 	}
 	now := time.Now()
 	r.resetPreviousLocked(now)
-	r.lastSampleAt.Store(now.UnixNano())
+	r.lastSampleAt.Store(int64(now.Sub(r.baseTime)))
 	r.lastFlushAt = now
 	r.started = true
-	go r.fallbackLoop()
+	go r.worker()
 	return nil
 }
 
@@ -169,8 +181,12 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.closed = true
+	r.access.Unlock()
 	close(r.done)
+	<-r.workerDone
 	now := time.Now()
+	r.access.Lock()
+	r.consumeBreakLocked()
 	r.sampleLocked(now)
 	r.flushLocked(now)
 	r.access.Unlock()
@@ -196,20 +212,29 @@ func (r *Recorder) writeLog() {
 	r.chown(logPath)
 }
 
+// Touch reports one I/O activity: one read or write call, or one batched receive or send
+// syscall on paths that batch packets. size is the size of the first packet of the activity
+// and characterizes what ended an idle period; it is not accumulated. Volume totals come from
+// the sampled interface counters instead.
 func (r *Recorder) Touch(direction Direction, size int, by *Attribution) {
-	r.packets.Add(1)
-	r.trafficBytes.Add(uint64(size))
-	now := time.Now()
-	nowNano := now.UnixNano()
+	nowNano := int64(time.Since(r.baseTime))
 	lastNano := r.lastActivity.Load()
 	if nowNano-lastNano < activityRefreshNano {
 		return
 	}
 	previousNano := r.lastActivity.Swap(nowNano)
 	if previousNano != 0 && nowNano-previousNano >= r.gateNano {
-		r.appendBreakEvent(now, (nowNano-previousNano)/int64(time.Millisecond), direction, size, by)
+		r.pendingBreak.Store(&breakRecord{
+			at:        time.Now(),
+			idleMS:    (nowNano - previousNano) / int64(time.Millisecond),
+			direction: direction,
+			size:      size,
+			by:        by,
+		})
+		r.notifyWorker()
+	} else if nowNano-r.lastSampleAt.Load() >= r.sampleNano {
+		r.notifyWorker()
 	}
-	r.maybeSample(now)
 }
 
 func (r *Recorder) CountDNSQuery() {
@@ -218,10 +243,6 @@ func (r *Recorder) CountDNSQuery() {
 
 func (r *Recorder) CountConnectionOpened() {
 	r.connectionsOpened.Add(1)
-}
-
-func (r *Recorder) CountConnectionClosed() {
-	r.connectionsClosed.Add(1)
 }
 
 func (r *Recorder) RecordPlatformEvent(eventType string) {
@@ -235,18 +256,15 @@ func (r *Recorder) RecordPlatformEvent(eventType string) {
 		Type: eventType,
 		At:   now.UTC().Format(time.RFC3339),
 	})
-	if len(r.events) >= eventCapacity {
-		r.flushLocked(now)
-	}
 	r.access.Unlock()
-	r.maybeSample(now)
+	r.notifyWorker()
 }
 
 func (r *Recorder) UpdateNetworkType(networkType string) {
 	now := time.Now()
 	r.access.Lock()
-	defer r.access.Unlock()
 	if r.closed || r.networkType == networkType {
+		r.access.Unlock()
 		return
 	}
 	r.networkType = networkType
@@ -255,60 +273,65 @@ func (r *Recorder) UpdateNetworkType(networkType string) {
 		At:          now.UTC().Format(time.RFC3339),
 		NetworkType: networkType,
 	})
+	r.access.Unlock()
+	r.notifyWorker()
 }
 
-func (r *Recorder) appendBreakEvent(now time.Time, idleMS int64, direction Direction, size int, by *Attribution) {
-	r.access.Lock()
-	defer r.access.Unlock()
-	if !r.started || r.closed {
-		return
-	}
-	r.events = append(r.events, eventRecord{
-		Type:        eventTypeBreak,
-		At:          now.UTC().Format(time.RFC3339),
-		IdleMS:      idleMS,
-		Direction:   direction.String(),
-		Size:        size,
-		NetworkType: r.networkType,
-		By:          by,
-	})
-	if len(r.events) >= eventCapacity {
-		r.flushLocked(now)
+func (r *Recorder) notifyWorker() {
+	select {
+	case r.notify <- struct{}{}:
+	default:
 	}
 }
 
-func (r *Recorder) maybeSample(now time.Time) {
-	nowNano := now.UnixNano()
-	lastNano := r.lastSampleAt.Load()
-	if nowNano-lastNano < r.sampleNano {
-		return
-	}
-	if !r.lastSampleAt.CompareAndSwap(lastNano, nowNano) {
-		return
-	}
-	r.access.Lock()
-	defer r.access.Unlock()
-	if !r.started || r.closed {
-		return
-	}
-	r.sampleLocked(now)
-	if now.Sub(r.lastFlushAt) >= r.flushInterval || len(r.rows) >= rowCapacity {
-		r.flushLocked(now)
-	}
-}
-
-func (r *Recorder) fallbackLoop() {
+func (r *Recorder) worker() {
+	defer close(r.workerDone)
 	timer := time.NewTimer(r.fallbackInterval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-r.done:
 			return
+		case <-r.notify:
 		case <-timer.C:
-			r.maybeSample(time.Now())
 			timer.Reset(r.fallbackInterval)
 		}
+		r.process()
 	}
+}
+
+func (r *Recorder) process() {
+	now := time.Now()
+	r.access.Lock()
+	defer r.access.Unlock()
+	if !r.started || r.closed {
+		return
+	}
+	r.consumeBreakLocked()
+	nowNano := int64(now.Sub(r.baseTime))
+	if nowNano-r.lastSampleAt.Load() >= r.sampleNano {
+		r.lastSampleAt.Store(nowNano)
+		r.sampleLocked(now)
+	}
+	if now.Sub(r.lastFlushAt) >= r.flushInterval || len(r.rows) >= rowCapacity || len(r.events) >= eventCapacity {
+		r.flushLocked(now)
+	}
+}
+
+func (r *Recorder) consumeBreakLocked() {
+	record := r.pendingBreak.Swap(nil)
+	if record == nil {
+		return
+	}
+	r.events = append(r.events, eventRecord{
+		Type:        eventTypeBreak,
+		At:          record.at.UTC().Format(time.RFC3339),
+		IdleMS:      record.idleMS,
+		Direction:   record.direction.String(),
+		Size:        record.size,
+		NetworkType: r.networkType,
+		By:          record.by,
+	})
 }
 
 func (r *Recorder) resetPreviousLocked(now time.Time) {
@@ -318,11 +341,8 @@ func (r *Recorder) resetPreviousLocked(now time.Time) {
 		usage:             readSystemUsage(),
 		gcSeconds:         r.metricsSamples[0].Value.Float64(),
 		interfaces:        readInterfaceCounters(),
-		packets:           r.packets.Load(),
-		trafficBytes:      r.trafficBytes.Load(),
 		dnsQueries:        r.dnsQueries.Load(),
 		connectionsOpened: r.connectionsOpened.Load(),
-		connectionsClosed: r.connectionsClosed.Load(),
 	}
 	r.previous.absoluteTime, r.previous.continuousTime = readClocks()
 }
@@ -336,11 +356,8 @@ func (r *Recorder) sampleLocked(now time.Time) {
 		To:                now.UTC().Format(time.RFC3339),
 		CPUGCMS:           int64((current.gcSeconds - previous.gcSeconds) * 1000),
 		Goroutines:        r.metricsSamples[1].Value.Uint64(),
-		Packets:           current.packets - previous.packets,
-		Bytes:             current.trafficBytes - previous.trafficBytes,
 		DNSQueries:        current.dnsQueries - previous.dnsQueries,
 		ConnectionsOpened: current.connectionsOpened - previous.connectionsOpened,
-		ConnectionsClosed: current.connectionsClosed - previous.connectionsClosed,
 		NetworkType:       r.networkType,
 	}
 	if current.usage.valid && previous.usage.valid {
@@ -366,8 +383,12 @@ func (r *Recorder) sampleLocked(now time.Time) {
 			row.QoSMS = &qos
 		}
 	}
-	if current.absoluteTime != 0 && previous.absoluteTime != 0 {
+	if current.absoluteTime != 0 && previous.absoluteTime != 0 && current.absoluteTime >= previous.absoluteTime {
 		sleptNano := (current.continuousTime - previous.continuousTime) - (current.absoluteTime - previous.absoluteTime)
+		wallNano := now.Sub(previous.at).Nanoseconds()
+		if sleptNano > wallNano {
+			sleptNano = wallNano
+		}
 		if sleptNano > 0 {
 			row.SleptMS = sleptNano / int64(time.Millisecond)
 		}
