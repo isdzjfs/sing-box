@@ -11,13 +11,13 @@ require (
 	github.com/docker/go-connections v0.5.0
 	github.com/gofrs/uuid/v5 v5.5.1
 	github.com/opencontainers/image-spec v1.1.0
-	github.com/sagernet/quic-go v0.61.0-sing-box-mod.6
+	github.com/sagernet/quic-go v0.61.0-sing-box-mod.7
 	github.com/sagernet/sing v0.9.0-beta.4
 	github.com/sagernet/sing-openvpn v0.0.0-20260729104525-103eb5fe5eb6
 	github.com/sagernet/sing-quic v0.7.0-beta.4
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
-	github.com/sagernet/sing-tun v0.9.0-beta.2
+	github.com/sagernet/sing-tun v0.9.0-beta.4
 	github.com/spyzhov/ajson v0.9.4
 	github.com/stretchr/testify v1.12.0
 	go.uber.org/goleak v1.3.0
@@ -159,11 +159,11 @@ require (
 	github.com/sagernet/sing-mux v0.3.5 // indirect
 	github.com/sagernet/sing-openconnect v0.0.0-20260810065514-53aa8058f8df // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1 // indirect
-	github.com/sagernet/sing-snell v0.0.0-20260824011554-f8ab8029469a // indirect
+	github.com/sagernet/sing-snell v0.0.0-20260829071736-20f2eaec77c3 // indirect
 	github.com/sagernet/sing-usbip v0.0.0-20260817040617-28bd42667eca // indirect
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
-	github.com/sagernet/tailscale v1.102.1-sing-box-1.14-mod.3 // indirect
+	github.com/sagernet/tailscale v1.102.1-sing-box-1.14-mod.4 // indirect
 	github.com/sagernet/wireguard-go v0.0.5-0.20260823125007-8bd032a91a30 // indirect
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/smallstep/pkcs7 v0.1.1 // indirect

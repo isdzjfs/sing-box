@@ -21,7 +21,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
-	"github.com/sagernet/sing/common/batch"
 	"github.com/sagernet/sing/common/memory"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/common/x/list"
@@ -603,7 +602,7 @@ func (s *StartedService) readGroups() *Groups {
 				item.Server = serverAddress.AddrString()
 				item.ServerPort = int32(serverAddress.Port)
 			}
-			if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(itemOutbound)); history != nil {
+			if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, itemOutbound)); history != nil {
 				item.UrlTestTime = history.Time.Unix()
 				item.UrlTestDelay = int32(history.Delay)
 			}
@@ -731,25 +730,11 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 	if isURLTest {
 		go urlTest.CheckOutbounds()
 	} else if isOutboundGroup {
-		outbounds := common.Filter(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
+		outbounds := common.FilterNotNil(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
 			itOutbound, _ := boxService.outboundManager.Outbound(it)
 			return itOutbound
-		}), func(it adapter.Outbound) bool {
-			if it == nil {
-				return false
-			}
-			_, isGroup := it.(adapter.OutboundGroup)
-			return !isGroup
-		})
-		b, _ := batch.New(boxService.ctx, batch.WithConcurrencyNum[any](10))
-		for _, detour := range outbounds {
-			outboundToTest := detour
-			itemTag := outboundToTest.Tag()
-			b.Go(itemTag, func() (any, error) {
-				runURLTest(boxService.ctx, historyStorage, outboundToTest, testURL)
-				return nil, nil
-			})
-		}
+		}))
+		go group.URLTestOutbounds(boxService.ctx, boxService.outboundManager, historyStorage, boxService.logFactory.Logger(), outbounds, "", 0, true)
 	} else {
 		go runURLTest(boxService.ctx, historyStorage, outbound, "")
 	}
@@ -1223,7 +1208,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					item.Server = serverAddress.AddrString()
 					item.ServerPort = int32(serverAddress.Port)
 				}
-				if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(ob)); history != nil {
+				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ob)); history != nil {
 					item.UrlTestTime = history.Time.Unix()
 					item.UrlTestDelay = int32(history.Delay)
 				}
@@ -1234,7 +1219,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					Tag:  ep.Tag(),
 					Type: ep.Type(),
 				}
-				if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(ep)); history != nil {
+				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ep)); history != nil {
 					item.UrlTestTime = history.Time.Unix()
 					item.UrlTestDelay = int32(history.Delay)
 				}
@@ -1692,6 +1677,7 @@ func tailscaleEndpointStatusToProto(tag string, s *adapter.TailscaleEndpointStat
 		WaitingFileCount:   s.WaitingFileCount,
 		ReceivingFileCount: s.ReceivingFileCount,
 		UnreadFileCount:    s.UnreadFileCount,
+		CertDomains:        s.CertDomains,
 	}
 	if s.Self != nil {
 		result.Self = tailscalePeerToProto(s.Self)
@@ -1800,6 +1786,33 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
 		return nil, err
 	}
 	return &emptypb.Empty{}, nil
+}
+
+func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *TailscaleCertificateRequest) (*TailscaleCertificate, error) {
+	err := s.waitForStarted(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.serviceAccess.RLock()
+	boxService := s.instance
+	s.serviceAccess.RUnlock()
+
+	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
+	if err != nil {
+		return nil, err
+	}
+	tsEndpoint, loaded := endpoint.(adapter.TailscaleEndpoint)
+	if !loaded {
+		return nil, status.Error(codes.FailedPrecondition, "endpoint does not support tailscale")
+	}
+	certificatePEM, privateKeyPEM, err := tsEndpoint.GetTailscaleCertificate(ctx, request.Domain, time.Duration(request.MinValiditySeconds)*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return &TailscaleCertificate{
+		CertificatePEM: certificatePEM,
+		PrivateKeyPEM:  privateKeyPEM,
+	}, nil
 }
 
 func (s *StartedService) SubscribeOpenConnectStatus(

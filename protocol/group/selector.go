@@ -277,9 +277,23 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 }
 
-func RealTag(detour adapter.Outbound) string {
-	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
-		return group.Now()
+func RealTag(outboundManager adapter.OutboundManager, detour adapter.Outbound) string {
+	tag := detour.Tag()
+	for {
+		group, isGroup := detour.(adapter.OutboundGroup)
+		if !isGroup {
+			return tag
+		}
+		tag = group.Now()
+		// Metadata-only callers may not have an outbound manager; preserve the
+		// previous one-level group resolution in that case.
+		if outboundManager == nil {
+			return tag
+		}
+		var loaded bool
+		detour, loaded = outboundManager.Outbound(tag)
+		if !loaded {
+			return tag
+		}
 	}
-	return detour.Tag()
 }
