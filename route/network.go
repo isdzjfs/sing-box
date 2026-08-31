@@ -376,7 +376,7 @@ func (r *NetworkManager) AutoDetectInterfaceFunc() control.Func {
 		if r.interfaceMonitor == nil {
 			return nil
 		}
-		bindFunc := control.BindToInterfaceFunc(r.interfaceFinder, func(network string, address string) (interfaceName string, interfaceIndex int, err error) {
+		return control.BindToInterfaceFunc(r.interfaceFinder, func(network string, address string) (interfaceName string, interfaceIndex int, err error) {
 			remoteAddr := M.ParseSocksaddr(address).Addr
 			if remoteAddr.IsValid() {
 				iif, err := r.interfaceFinder.ByAddr(remoteAddr)
@@ -390,12 +390,6 @@ func (r *NetworkManager) AutoDetectInterfaceFunc() control.Func {
 			}
 			return defaultInterface.Name, defaultInterface.Index, nil
 		})
-		return func(network, address string, conn syscall.RawConn) error {
-			if r.autoRedirectOutputMark != 0 {
-				return nil
-			}
-			return bindFunc(network, address, conn)
-		}
 	}
 }
 
