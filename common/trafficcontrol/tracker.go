@@ -77,7 +77,9 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 	} else {
 		next = m.outbound.Default().Tag()
 	}
-	for {
+	visited := make(map[string]bool)
+	for next != "" && !visited[next] {
+		visited[next] = true
 		detour, loaded := m.outbound.Outbound(next)
 		if !loaded {
 			break
@@ -89,7 +91,7 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 		if !isGroup {
 			break
 		}
-		next = outboundGroup.Now()
+		next = adapter.OutboundGroupNow(outboundGroup, metadata.Network)
 	}
 	return TrackerMetadata{
 		ID:           id,

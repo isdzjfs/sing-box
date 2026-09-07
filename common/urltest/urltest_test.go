@@ -86,6 +86,52 @@ func TestHistoryStorageKeepsRecentEntries(t *testing.T) {
 	require.Equal(t, uint16(27), latest.Delay)
 }
 
+func TestHistoryStorageIsolatesTargetsAndReservations(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	first, second := "https://first.example/probe", "https://second.example/probe"
+	require.True(t, storage.ReserveURLTest("shared", checkedAt, false, first))
+	require.True(t, storage.ReserveURLTest("shared", checkedAt, false, second))
+	success := storage.StoreURLTestHistory("shared", &adapter.URLTestHistory{Time: checkedAt, Delay: 42}, first)
+	failure := storage.StoreURLTestFailure("shared", checkedAt, second)
+	require.Same(t, success, storage.LoadURLTestHistory("shared", first))
+	require.Nil(t, storage.LoadURLTestHistory("shared", second))
+	require.Same(t, failure, storage.LoadLatestURLTestHistory("shared", second))
+	require.Greater(t, failure.Sequence, success.Sequence)
+	storage.FinishURLTest("shared", checkedAt, first)
+	_, checking := storage.URLTestCheckingAt("shared", second)
+	require.True(t, checking)
+	storage.FinishURLTest("shared", checkedAt, second)
+	_, healthy := storage.WaitURLTestResult(context.Background(), "shared", checkedAt, first)
+	require.NoError(t, healthy)
+	storage.DeleteURLTestHistory("shared", second)
+	require.Same(t, success, storage.LoadURLTestHistory("shared", first))
+}
+
+func TestHistoryStorageEquivalentURLsShareScope(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	require.True(t, storage.ReserveURLTest("shared", checkedAt, false))
+	require.False(t, storage.ReserveURLTest("shared", checkedAt, true, DefaultURL))
+	success := storage.StoreURLTestHistory("shared", &adapter.URLTestHistory{Time: checkedAt, Delay: 10})
+	require.Same(t, success, storage.LoadURLTestHistory("shared", "https://WWW.GSTATIC.COM:443/generate_204#unused"))
+	require.Equal(t, "http://[::1]/", NormalizeURL("http://[::1]:80"))
+	require.NotEqual(t, NormalizeURL("https://example.com/probe?a=1"), NormalizeURL("https://example.com/probe?a=2"))
+}
+
+func TestHistoryStorageFailureAndRepeatedTimestampHaveDistinctSequences(t *testing.T) {
+	storage := NewHistoryStorage()
+	checkedAt := time.Now()
+	input := &adapter.URLTestHistory{Time: checkedAt, Delay: 42}
+	success := storage.StoreURLTestHistory("node", input)
+	failure := storage.StoreURLTestFailure("node", checkedAt)
+	require.Zero(t, input.Sequence)
+	require.Positive(t, success.Sequence)
+	require.Greater(t, failure.Sequence, success.Sequence)
+	require.Same(t, failure, storage.LoadLatestURLTestHistory("node"))
+	require.Nil(t, storage.LoadURLTestHistory("node"))
+}
+
 func TestHistoryStorageDoesNotReplaceCurrentWithOlderResult(t *testing.T) {
 	storage := NewHistoryStorage()
 	baseTime := time.Unix(1000, 0)
@@ -94,11 +140,13 @@ func TestHistoryStorageDoesNotReplaceCurrentWithOlderResult(t *testing.T) {
 		Time:  baseTime.Add(2 * time.Second),
 		Delay: 20,
 	}
-	storage.StoreURLTestHistory("proxy", newer)
+	stored := storage.StoreURLTestHistory("proxy", newer)
 	storage.StoreURLTestFailure("proxy", baseTime.Add(time.Second))
 
 	current := storage.LoadURLTestHistory("proxy")
-	require.Same(t, newer, current)
+	require.Same(t, stored, current)
+	require.Equal(t, newer.Time, current.Time)
+	require.Equal(t, newer.Delay, current.Delay)
 
 	histories := storage.LoadURLTestHistories("proxy")
 	require.Len(t, histories, 2)

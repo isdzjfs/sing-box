@@ -521,7 +521,7 @@ func (d *DefaultDialer) dialAttribution(ctx context.Context, destination M.Socks
 			}
 		}
 		if metadata.RouteOutbound != "" {
-			attribution.Chain = d.outboundChain(metadata.RouteOutbound)
+			attribution.Chain = d.outboundChain(metadata.RouteOutbound, metadata.Network)
 		}
 	}
 	if metadata.Destination.IsValid() {
@@ -535,10 +535,16 @@ func (d *DefaultDialer) dialAttribution(ctx context.Context, destination M.Socks
 	return attribution
 }
 
-func (d *DefaultDialer) outboundChain(head string) []string {
+func (d *DefaultDialer) outboundChain(head string, networks ...string) []string {
 	var chain []string
+	network := N.NetworkTCP
+	if len(networks) > 0 && networks[0] != "" {
+		network = networks[0]
+	}
 	next := head
-	for {
+	visited := make(map[string]bool)
+	for next != "" && !visited[next] {
+		visited[next] = true
 		detour, loaded := d.outboundManager.Outbound(next)
 		if !loaded {
 			break
@@ -548,7 +554,7 @@ func (d *DefaultDialer) outboundChain(head string) []string {
 		if !isGroup {
 			break
 		}
-		next = outboundGroup.Now()
+		next = adapter.OutboundGroupNow(outboundGroup, network)
 	}
 	slices.Reverse(chain)
 	return chain

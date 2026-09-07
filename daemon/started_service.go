@@ -602,10 +602,20 @@ func (s *StartedService) readGroups() *Groups {
 				item.Server = serverAddress.AddrString()
 				item.ServerPort = int32(serverAddress.Port)
 			}
-			if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, itemOutbound)); history != nil {
-				item.UrlTestTime = history.Time.Unix()
-				item.UrlTestDelay = int32(history.Delay)
+			var links []string
+			if testGroup, loaded := iGroup.(*group.URLTest); loaded {
+				links = []string{testGroup.TestURL()}
 			}
+			tag := group.RealTag(boxService.outboundManager, itemOutbound)
+			if _, nested := itemOutbound.(adapter.OutboundGroup); nested {
+				link := ""
+				if len(links) > 0 {
+					link = links[0]
+				}
+				tag, link = group.URLTestHistoryScope(boxService.outboundManager, itemOutbound, "tcp", link)
+				links = []string{link}
+			}
+			setGroupItemURLTest(&item, historyStorage.LoadLatestURLTestHistory(tag, links...))
 			g.Items = append(g.Items, &item)
 		}
 		if len(g.Items) == 0 {
@@ -614,6 +624,16 @@ func (s *StartedService) readGroups() *Groups {
 		gs.Group = append(gs.Group, &g)
 	}
 	return &gs
+}
+
+func setGroupItemURLTest(item *GroupItem, history *adapter.URLTestHistory) {
+	if history == nil {
+		return
+	}
+	item.UrlTestTime = history.Time.Unix() // Preserve the existing seconds-based field.
+	item.UrlTestTimeMillis = history.Time.UnixMilli()
+	item.UrlTestSequence = history.Sequence
+	item.UrlTestDelay = int32(history.Delay)
 }
 
 func (s *StartedService) GetClashModeStatus(ctx context.Context, empty *emptypb.Empty) (*ClashModeStatus, error) {
@@ -760,14 +780,15 @@ func outboundInGroup(boxService *Instance, outboundGroup adapter.OutboundGroup, 
 
 func runURLTest(ctx context.Context, historyStorage *urltest.HistoryStorage, outboundToTest adapter.Outbound, testURL string) {
 	outboundTag := outboundToTest.Tag()
+	checkedAt := time.Now()
 	t, err := urltest.URLTest(ctx, testURL, outboundToTest)
 	if err != nil {
-		historyStorage.DeleteURLTestHistory(outboundTag)
+		historyStorage.StoreURLTestFailure(outboundTag, checkedAt, testURL)
 	} else {
 		historyStorage.StoreURLTestHistory(outboundTag, &adapter.URLTestHistory{
-			Time:  time.Now(),
+			Time:  checkedAt,
 			Delay: t,
-		})
+		}, testURL)
 	}
 }
 
@@ -1210,10 +1231,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					item.Server = serverAddress.AddrString()
 					item.ServerPort = int32(serverAddress.Port)
 				}
-				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ob)); history != nil {
-					item.UrlTestTime = history.Time.Unix()
-					item.UrlTestDelay = int32(history.Delay)
-				}
+				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(boxService.outboundManager, ob)))
 				list.Outbounds = append(list.Outbounds, item)
 			}
 			for _, ep := range boxService.endpointManager.Endpoints() {
@@ -1221,10 +1239,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					Tag:  ep.Tag(),
 					Type: ep.Type(),
 				}
-				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ep)); history != nil {
-					item.UrlTestTime = history.Time.Unix()
-					item.UrlTestDelay = int32(history.Delay)
-				}
+				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(boxService.outboundManager, ep)))
 				list.Outbounds = append(list.Outbounds, item)
 			}
 		}

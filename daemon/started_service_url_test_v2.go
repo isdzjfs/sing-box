@@ -56,6 +56,7 @@ func (s *StartedService) URLTestItemsV2(ctx context.Context, request *URLTestIte
 					ItemTag:  result.ItemTag,
 					Delay:    int32(result.Delay),
 					TimedOut: result.TimedOut,
+					Sequence: result.Sequence,
 				}
 				if !result.TestedAt.IsZero() {
 					itemResult.TestedAt = result.TestedAt.UnixMilli()

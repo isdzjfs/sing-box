@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,12 +31,54 @@ type HistoryStorage struct {
 	checking       map[string]time.Time
 	updateHooks    []*observable.Subscriber[struct{}]
 	updateWait     chan struct{}
+	sequence       int64
 }
 
 const (
 	maxHistoryEntries    = 20
 	duplicateCheckWindow = time.Second
+	DefaultURL           = "https://www.gstatic.com/generate_204"
 )
+
+// NormalizeURL keeps the implicit default and equivalent HTTP targets in one scope.
+func NormalizeURL(link string) string {
+	if link == "" {
+		return DefaultURL
+	}
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return link
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	if parsed.Scheme == "https" && parsed.Port() == "443" || parsed.Scheme == "http" && parsed.Port() == "80" {
+		parsed.Host = parsed.Hostname()
+		if strings.Contains(parsed.Host, ":") {
+			parsed.Host = "[" + parsed.Host + "]"
+		}
+	}
+	parsed.Fragment = ""
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String()
+}
+
+func scopedHistoryKey(tag string, links []string) string {
+	link := ""
+	if len(links) > 0 {
+		link = links[0]
+	}
+	return tag + "\x00" + NormalizeURL(link)
+}
+
+// Queries without a target retain the aggregate history used by generic node lists.
+func historyQueryKey(tag string, links []string) string {
+	if len(links) == 0 {
+		return tag
+	}
+	return scopedHistoryKey(tag, links)
+}
 
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
@@ -43,6 +86,7 @@ func NewHistoryStorage() *HistoryStorage {
 		delayHistory:   make(map[string][]*adapter.URLTestHistory),
 		checking:       make(map[string]time.Time),
 		updateWait:     make(chan struct{}),
+		sequence:       time.Now().UnixNano(),
 	}
 }
 
@@ -58,26 +102,36 @@ func (s *HistoryStorage) NotifyUpdated() {
 	s.notifyUpdated()
 }
 
-func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory {
+func (s *HistoryStorage) LoadURLTestHistory(tag string, links ...string) *adapter.URLTestHistory {
 	if s == nil {
 		return nil
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	return s.currentHistory[tag]
+	return s.currentHistory[historyQueryKey(tag, links)]
 }
 
-func (s *HistoryStorage) LoadURLTestHistories(tag string) []*adapter.URLTestHistory {
+func (s *HistoryStorage) LoadURLTestHistories(tag string, links ...string) []*adapter.URLTestHistory {
 	if s == nil {
 		return []*adapter.URLTestHistory{}
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	histories := s.delayHistory[tag]
+	histories := s.delayHistory[historyQueryKey(tag, links)]
 	if len(histories) == 0 {
 		return []*adapter.URLTestHistory{}
 	}
 	return append([]*adapter.URLTestHistory(nil), histories...)
+}
+
+// Latest results include failures; selectable history deliberately does not.
+func (s *HistoryStorage) LoadLatestURLTestHistory(tag string, links ...string) *adapter.URLTestHistory {
+	if s == nil {
+		return nil
+	}
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.lastHistoryLocked(historyQueryKey(tag, links))
 }
 
 func (s *HistoryStorage) appendHistoryLocked(tag string, history *adapter.URLTestHistory) {
@@ -104,13 +158,14 @@ func (s *HistoryStorage) isLatestHistoryLocked(tag string, checkedAt time.Time) 
 	return latest == nil || !checkedAt.Before(latest.Time)
 }
 
-func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, force bool) bool {
+func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, force bool, links ...string) bool {
 	if s == nil {
 		return true
 	}
 	if checkedAt.IsZero() {
 		checkedAt = time.Now()
 	}
+	tag = scopedHistoryKey(tag, links)
 	s.access.Lock()
 	defer s.access.Unlock()
 	if s.checking == nil {
@@ -129,10 +184,11 @@ func (s *HistoryStorage) ReserveURLTest(tag string, checkedAt time.Time, force b
 	return true
 }
 
-func (s *HistoryStorage) FinishURLTest(tag string, checkedAt time.Time) {
+func (s *HistoryStorage) FinishURLTest(tag string, checkedAt time.Time, links ...string) {
 	if s == nil {
 		return
 	}
+	tag = scopedHistoryKey(tag, links)
 	s.access.Lock()
 	defer s.access.Unlock()
 	if checkingAt, loaded := s.checking[tag]; loaded && checkingAt.Equal(checkedAt) {
@@ -141,17 +197,18 @@ func (s *HistoryStorage) FinishURLTest(tag string, checkedAt time.Time) {
 	}
 }
 
-func (s *HistoryStorage) URLTestCheckingAt(tag string) (time.Time, bool) {
+func (s *HistoryStorage) URLTestCheckingAt(tag string, links ...string) (time.Time, bool) {
 	if s == nil {
 		return time.Time{}, false
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	checkingAt, loaded := s.checking[tag]
+	checkingAt, loaded := s.checking[scopedHistoryKey(tag, links)]
 	return checkingAt, loaded
 }
 
-func (s *HistoryStorage) WaitURLTestResult(ctx context.Context, tag string, checkedAt time.Time) (*adapter.URLTestHistory, error) {
+func (s *HistoryStorage) WaitURLTestResult(ctx context.Context, tag string, checkedAt time.Time, links ...string) (*adapter.URLTestHistory, error) {
+	tag = scopedHistoryKey(tag, links)
 	for {
 		s.access.RLock()
 		history := s.lastHistoryLocked(tag)
@@ -172,42 +229,47 @@ func (s *HistoryStorage) WaitURLTestResult(ctx context.Context, tag string, chec
 	}
 }
 
-func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
+func (s *HistoryStorage) DeleteURLTestHistory(tag string, links ...string) {
 	s.access.Lock()
 	// Keep visible delay history intact; only remove the current selectable result.
 	delete(s.currentHistory, tag)
+	delete(s.currentHistory, scopedHistoryKey(tag, links))
 	s.notifyUpdated()
 	s.access.Unlock()
 }
 
-func (s *HistoryStorage) StoreURLTestFailure(tag string, checkedAt time.Time) {
+func (s *HistoryStorage) StoreURLTestFailure(tag string, checkedAt time.Time, links ...string) *adapter.URLTestHistory {
 	if checkedAt.IsZero() {
 		checkedAt = time.Now()
 	}
-	s.access.Lock()
 	history := &adapter.URLTestHistory{
 		Time:  checkedAt,
 		Delay: 0,
 	}
-	// Commit the current result by probe time, not completion order, so an older
-	// slow probe cannot invalidate a newer result.
-	if s.isLatestHistoryLocked(tag, checkedAt) {
-		delete(s.currentHistory, tag)
-	}
-	s.appendHistoryLocked(tag, history)
-	s.notifyUpdated()
-	s.access.Unlock()
+	return s.StoreURLTestHistory(tag, history, links...)
 }
 
-func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
+func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory, links ...string) *adapter.URLTestHistory {
 	s.access.Lock()
-	isLatest := s.isLatestHistoryLocked(tag, history.Time)
-	s.appendHistoryLocked(tag, history)
-	if isLatest {
-		s.currentHistory[tag] = history
+	// Store an immutable copy; callers and concurrent readers must not share a
+	// mutable sequence field. Publish both the target scope and the generic view.
+	stored := *history
+	s.sequence++
+	stored.Sequence = s.sequence
+	for _, key := range []string{scopedHistoryKey(tag, links), tag} {
+		isLatest := s.isLatestHistoryLocked(key, stored.Time)
+		s.appendHistoryLocked(key, &stored)
+		if isLatest {
+			if stored.Delay == 0 {
+				delete(s.currentHistory, key)
+			} else {
+				s.currentHistory[key] = &stored
+			}
+		}
 	}
 	s.notifyUpdated()
 	s.access.Unlock()
+	return &stored
 }
 
 func (s *HistoryStorage) notifyUpdated() {
@@ -248,9 +310,7 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) 
 }
 
 func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
-	if link == "" {
-		link = "https://www.gstatic.com/generate_204"
-	}
+	link = NormalizeURL(link)
 	linkURL, err := url.Parse(link)
 	if err != nil {
 		return 0, E.Cause(err, "parse URL test target")
@@ -300,6 +360,7 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 		return 0, E.Cause(err, "perform URL test request to ", hostname, ":", port)
 	}
 	resp.Body.Close()
-	t = uint16(time.Since(start) / time.Millisecond)
+	// Zero is reserved for failures in history and client APIs.
+	t = uint16(min(max(time.Since(start)/time.Millisecond, 1), 65535))
 	return
 }

@@ -14,6 +14,7 @@ type URLTestItemResult struct {
 	TestedAt     int64
 	ErrorMessage string
 	TimedOut     bool
+	Sequence     int64
 }
 
 type URLTestItemResultIterator interface {
@@ -123,6 +124,7 @@ func urlTestBatchResultFromGRPC(response *daemon.URLTestItemsV2Response) *URLTes
 			TestedAt:     item.TestedAt,
 			ErrorMessage: item.ErrorMessage,
 			TimedOut:     item.TimedOut,
+			Sequence:     item.Sequence,
 		})
 	}
 	return &URLTestBatchResult{RequestID: response.RequestId, results: results}

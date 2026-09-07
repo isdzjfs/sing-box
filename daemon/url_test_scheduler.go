@@ -32,6 +32,7 @@ type urlTestSchedulerResult struct {
 	TestedAt time.Time
 	Err      error
 	TimedOut bool
+	Sequence int64
 }
 
 func newURLTestScheduler(
@@ -70,6 +71,7 @@ func (s *urlTestScheduler) Test(
 	if err != nil {
 		return urlTestSchedulerResult{ItemTag: itemTag, Err: err}
 	}
+	effectiveTestURL = urltest.NormalizeURL(effectiveTestURL)
 	key := itemTag + "\x00" + effectiveTestURL
 	resultChannel := s.inflight.DoChan(key, func() (any, error) {
 		return s.test(s.ctx, itemTag, effectiveTestURL, outboundToTest, timeout), nil
@@ -94,10 +96,10 @@ func (s *urlTestScheduler) test(
 ) urlTestSchedulerResult {
 	result := urlTestSchedulerResult{ItemTag: itemTag}
 	reservedAt := time.Now()
-	if !s.historyStorage.ReserveURLTest(itemTag, reservedAt, true) {
-		checkingAt, checking := s.historyStorage.URLTestCheckingAt(itemTag)
+	if !s.historyStorage.ReserveURLTest(itemTag, reservedAt, true, testURL) {
+		checkingAt, checking := s.historyStorage.URLTestCheckingAt(itemTag, testURL)
 		if !checking {
-			histories := s.historyStorage.LoadURLTestHistories(itemTag)
+			histories := s.historyStorage.LoadURLTestHistories(itemTag, testURL)
 			if len(histories) == 0 {
 				result.Err = status.Error(codes.Aborted, "url test already completed")
 				return result
@@ -107,7 +109,7 @@ func (s *urlTestScheduler) test(
 		}
 		waitContext, cancel := context.WithTimeout(requestContext, timeout)
 		defer cancel()
-		history, waitErr := s.historyStorage.WaitURLTestResult(waitContext, itemTag, checkingAt)
+		history, waitErr := s.historyStorage.WaitURLTestResult(waitContext, itemTag, checkingAt, testURL)
 		if waitErr != nil {
 			result.Err = waitErr
 			result.TimedOut = errors.Is(waitErr, context.DeadlineExceeded)
@@ -116,7 +118,7 @@ func (s *urlTestScheduler) test(
 		applyURLTestHistory(&result, history)
 		return result
 	}
-	defer s.historyStorage.FinishURLTest(itemTag, reservedAt)
+	defer s.historyStorage.FinishURLTest(itemTag, reservedAt, testURL)
 	select {
 	case s.concurrency <- struct{}{}:
 		defer func() { <-s.concurrency }()
@@ -132,13 +134,13 @@ func (s *urlTestScheduler) test(
 	defer cancel()
 	delay, testErr := urltest.URLTest(testContext, testURL, outboundToTest)
 	if testErr != nil {
-		s.historyStorage.StoreURLTestFailure(itemTag, checkedAt)
+		result.Sequence = s.historyStorage.StoreURLTestFailure(itemTag, checkedAt, testURL).Sequence
 		result.Err = testErr
 		result.TimedOut = errors.Is(testErr, context.DeadlineExceeded) || errors.Is(testContext.Err(), context.DeadlineExceeded)
 		return result
 	}
 	result.Delay = delay
-	s.historyStorage.StoreURLTestHistory(itemTag, &adapter.URLTestHistory{Time: checkedAt, Delay: delay})
+	result.Sequence = s.historyStorage.StoreURLTestHistory(itemTag, &adapter.URLTestHistory{Time: checkedAt, Delay: delay}, testURL).Sequence
 	return result
 }
 
@@ -164,6 +166,7 @@ func (s *urlTestScheduler) resolveTarget(groupTag string, itemTag string, testUR
 }
 
 func applyURLTestHistory(result *urlTestSchedulerResult, history *adapter.URLTestHistory) {
+	result.Sequence = history.Sequence
 	result.TestedAt = history.Time
 	result.Delay = history.Delay
 	if history.Delay == 0 {

@@ -131,6 +131,8 @@ message GroupItem {
   int32 urlTestDelay = 4;
   string server = 5;
   int32 serverPort = 6;
+  int64 urlTestTimeMillis = 7;
+  int64 urlTestSequence = 8;
 }
 
 message URLTestRequest {
@@ -152,6 +154,7 @@ message URLTestItemV2Result {
   int64 testedAt = 3;
   string errorMessage = 4;
   bool timedOut = 5;
+  int64 sequence = 6;
 }
 
 message URLTestItemsV2Response {

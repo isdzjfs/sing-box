@@ -766,15 +766,17 @@ func (x *Group) GetItems() []*GroupItem {
 }
 
 type GroupItem struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Tag           string                 `protobuf:"bytes,1,opt,name=tag,proto3" json:"tag,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	UrlTestTime   int64                  `protobuf:"varint,3,opt,name=urlTestTime,proto3" json:"urlTestTime,omitempty"`
-	UrlTestDelay  int32                  `protobuf:"varint,4,opt,name=urlTestDelay,proto3" json:"urlTestDelay,omitempty"`
-	Server        string                 `protobuf:"bytes,5,opt,name=server,proto3" json:"server,omitempty"`
-	ServerPort    int32                  `protobuf:"varint,6,opt,name=serverPort,proto3" json:"serverPort,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Tag               string                 `protobuf:"bytes,1,opt,name=tag,proto3" json:"tag,omitempty"`
+	Type              string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	UrlTestTime       int64                  `protobuf:"varint,3,opt,name=urlTestTime,proto3" json:"urlTestTime,omitempty"`
+	UrlTestDelay      int32                  `protobuf:"varint,4,opt,name=urlTestDelay,proto3" json:"urlTestDelay,omitempty"`
+	Server            string                 `protobuf:"bytes,5,opt,name=server,proto3" json:"server,omitempty"`
+	ServerPort        int32                  `protobuf:"varint,6,opt,name=serverPort,proto3" json:"serverPort,omitempty"`
+	UrlTestTimeMillis int64                  `protobuf:"varint,7,opt,name=urlTestTimeMillis,proto3" json:"urlTestTimeMillis,omitempty"`
+	UrlTestSequence   int64                  `protobuf:"varint,8,opt,name=urlTestSequence,proto3" json:"urlTestSequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GroupItem) Reset() {
@@ -845,6 +847,20 @@ func (x *GroupItem) GetServer() string {
 func (x *GroupItem) GetServerPort() int32 {
 	if x != nil {
 		return x.ServerPort
+	}
+	return 0
+}
+
+func (x *GroupItem) GetUrlTestTimeMillis() int64 {
+	if x != nil {
+		return x.UrlTestTimeMillis
+	}
+	return 0
+}
+
+func (x *GroupItem) GetUrlTestSequence() int64 {
+	if x != nil {
+		return x.UrlTestSequence
 	}
 	return 0
 }
@@ -984,6 +1000,7 @@ type URLTestItemV2Result struct {
 	TestedAt      int64                  `protobuf:"varint,3,opt,name=testedAt,proto3" json:"testedAt,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,4,opt,name=errorMessage,proto3" json:"errorMessage,omitempty"`
 	TimedOut      bool                   `protobuf:"varint,5,opt,name=timedOut,proto3" json:"timedOut,omitempty"`
+	Sequence      int64                  `protobuf:"varint,6,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1051,6 +1068,13 @@ func (x *URLTestItemV2Result) GetTimedOut() bool {
 		return x.TimedOut
 	}
 	return false
+}
+
+func (x *URLTestItemV2Result) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
 }
 
 type URLTestItemsV2Response struct {
@@ -7726,7 +7750,7 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"selectable\x12\x1a\n" +
 	"\bselected\x18\x04 \x01(\tR\bselected\x12\x1a\n" +
 	"\bisExpand\x18\x05 \x01(\bR\bisExpand\x12'\n" +
-	"\x05items\x18\x06 \x03(\v2\x11.daemon.GroupItemR\x05items\"\xaf\x01\n" +
+	"\x05items\x18\x06 \x03(\v2\x11.daemon.GroupItemR\x05items\"\x87\x02\n" +
 	"\tGroupItem\x12\x10\n" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12 \n" +
@@ -7735,7 +7759,9 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\x06server\x18\x05 \x01(\tR\x06server\x12\x1e\n" +
 	"\n" +
 	"serverPort\x18\x06 \x01(\x05R\n" +
-	"serverPort\"L\n" +
+	"serverPort\x12,\n" +
+	"\x11urlTestTimeMillis\x18\a \x01(\x03R\x11urlTestTimeMillis\x12(\n" +
+	"\x0furlTestSequence\x18\b \x01(\x03R\x0furlTestSequence\"L\n" +
 	"\x0eURLTestRequest\x12 \n" +
 	"\voutboundTag\x18\x01 \x01(\tR\voutboundTag\x12\x18\n" +
 	"\aitemTag\x18\x02 \x01(\tR\aitemTag\"\xb3\x01\n" +
@@ -7744,13 +7770,14 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\voutboundTag\x18\x02 \x01(\tR\voutboundTag\x12\x1a\n" +
 	"\bitemTags\x18\x03 \x03(\tR\bitemTags\x12\x18\n" +
 	"\atestURL\x18\x04 \x01(\tR\atestURL\x12$\n" +
-	"\rtimeoutMillis\x18\x05 \x01(\x03R\rtimeoutMillis\"\xa1\x01\n" +
+	"\rtimeoutMillis\x18\x05 \x01(\x03R\rtimeoutMillis\"\xbd\x01\n" +
 	"\x13URLTestItemV2Result\x12\x18\n" +
 	"\aitemTag\x18\x01 \x01(\tR\aitemTag\x12\x14\n" +
 	"\x05delay\x18\x02 \x01(\x05R\x05delay\x12\x1a\n" +
 	"\btestedAt\x18\x03 \x01(\x03R\btestedAt\x12\"\n" +
 	"\ferrorMessage\x18\x04 \x01(\tR\ferrorMessage\x12\x1a\n" +
-	"\btimedOut\x18\x05 \x01(\bR\btimedOut\"m\n" +
+	"\btimedOut\x18\x05 \x01(\bR\btimedOut\x12\x1a\n" +
+	"\bsequence\x18\x06 \x01(\x03R\bsequence\"m\n" +
 	"\x16URLTestItemsV2Response\x12\x1c\n" +
 	"\trequestId\x18\x01 \x01(\tR\trequestId\x125\n" +
 	"\aresults\x18\x02 \x03(\v2\x1b.daemon.URLTestItemV2ResultR\aresults\"U\n" +

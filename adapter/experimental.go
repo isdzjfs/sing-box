@@ -14,6 +14,8 @@ import (
 type URLTestHistory struct {
 	Time  time.Time `json:"time"`
 	Delay uint16    `json:"delay"`
+	// Sequence identifies a completed result even when two probes share a timestamp.
+	Sequence int64 `json:"-"`
 }
 
 type V2RayServer interface {
