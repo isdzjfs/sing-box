@@ -25,3 +25,7 @@ AGENTS.md
 /.codex-gocache/
 /proxy_providers
 *.md
+
+# Keep downstream maintenance instructions available in every checkout.
+!/AGENTS.md
+!/docs/maintenance/UPSTREAM_SYNC_GUARDS.md
