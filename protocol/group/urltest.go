@@ -34,6 +34,7 @@ var (
 	_ adapter.OutboundGroup           = (*URLTest)(nil)
 	_ adapter.OutboundGroupIcon       = (*URLTest)(nil)
 	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
+	_ adapter.Referrer                = (*URLTest)(nil)
 )
 
 const maxURLTestDialAttempts = 2
@@ -159,6 +160,23 @@ func (s *URLTest) TestURL() string {
 
 func (s *URLTest) InterruptsExternalConnections() bool {
 	return s.interruptExternalConnections || s.group != nil && s.group.interruptExternalConnections
+}
+
+func (s *URLTest) References() []string {
+	group := s.group
+	if group == nil {
+		return nil
+	}
+	group.selectedAccess.RLock()
+	defer group.selectedAccess.RUnlock()
+	var references []string
+	if group.selectedOutboundTCP != nil {
+		references = append(references, group.selectedOutboundTCP.Tag())
+	}
+	if group.selectedOutboundUDP != nil && group.selectedOutboundUDP != group.selectedOutboundTCP {
+		references = append(references, group.selectedOutboundUDP.Tag())
+	}
+	return references
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
@@ -771,6 +789,7 @@ func (g *URLTestGroup) performUpdateCheck() {
 	udpOutbound, udpExists := g.Select(N.NetworkUDP)
 	if updated, generation := g.applySelectedUpdate(tcpOutbound, tcpExists, udpOutbound, udpExists); updated {
 		g.interruptGroup.InterruptBefore(generation, g.interruptExternalConnections)
+		g.history.NotifyUpdated()
 	}
 }
 

@@ -428,9 +428,17 @@ func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, 
 		if recorder != nil {
 			recorder.CountConnectionOpened()
 			attribution := d.dialAttribution(ctx, destination)
+			outboundCounter := recorder.TrafficCounter(powerreport.TrafficOutbound, attribution.Outbound)
+			dnsCounter := recorder.TrafficCounter(powerreport.TrafficDNSTransport, attribution.DNS)
+			outboundCounter.CountDial()
+			dnsCounter.CountDial()
 			conn = bufio.NewCounterConn(conn, []N.CountFunc{func(n int64) {
+				outboundCounter.CountIn(n)
+				dnsCounter.CountIn(n)
 				recorder.Touch(powerreport.DirectionInbound, int(n), attribution)
 			}}, []N.CountFunc{func(n int64) {
+				outboundCounter.CountOut(n)
+				dnsCounter.CountOut(n)
 				recorder.Touch(powerreport.DirectionOutbound, int(n), attribution)
 			}})
 		}
@@ -450,9 +458,17 @@ func (d *DefaultDialer) trackPacketConn(ctx context.Context, destination M.Socks
 		if recorder != nil {
 			recorder.CountConnectionOpened()
 			attribution := d.dialAttribution(ctx, destination)
+			outboundCounter := recorder.TrafficCounter(powerreport.TrafficOutbound, attribution.Outbound)
+			dnsCounter := recorder.TrafficCounter(powerreport.TrafficDNSTransport, attribution.DNS)
+			outboundCounter.CountDial()
+			dnsCounter.CountDial()
 			conn = bufio.NewNetPacketConn(bufio.NewCounterPacketConn(bufio.NewPacketConn(conn), []N.CountFunc{func(n int64) {
+				outboundCounter.CountIn(n)
+				dnsCounter.CountIn(n)
 				recorder.Touch(powerreport.DirectionInbound, int(n), attribution)
 			}}, []N.CountFunc{func(n int64) {
+				outboundCounter.CountOut(n)
+				dnsCounter.CountOut(n)
 				recorder.Touch(powerreport.DirectionOutbound, int(n), attribution)
 			}}))
 		}
@@ -491,8 +507,8 @@ func (d *DefaultDialer) dialAttribution(ctx context.Context, destination M.Socks
 			ProcessID:    metadata.ProcessInfo.ProcessID,
 			UserID:       metadata.ProcessInfo.UserId,
 			UserName:     metadata.ProcessInfo.UserName,
-			ProcessPath:  metadata.ProcessInfo.ProcessPath,
-			PackageNames: metadata.ProcessInfo.AndroidPackageNames,
+			ProcessPaths: metadata.ProcessInfo.ProcessPaths,
+			PackageNames: metadata.ProcessInfo.PackageNames,
 		}
 	}
 	attribution.Rule = metadata.RouteRule

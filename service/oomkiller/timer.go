@@ -98,15 +98,7 @@ func buildTimerConfig(options option.OOMKillerServiceOptions, memoryLimit uint64
 	}, nil
 }
 
-type adaptiveTimer struct {
-	timerConfig
-	logger          log.ContextLogger
-	network         adapter.NetworkManager
-	onTriggered     func(uint64)
-	limitThresholds pressureThresholds
-
-	access                  sync.Mutex
-	timer                   *time.Timer
+type timerState struct {
 	state                   pressureState
 	currentInterval         time.Duration
 	forceMinInterval        bool
@@ -115,12 +107,28 @@ type adaptiveTimer struct {
 	pressureBaselineTime    time.Time
 }
 
-func newAdaptiveTimer(logger log.ContextLogger, network adapter.NetworkManager, config timerConfig, onTriggered func(uint64)) *adaptiveTimer {
+type adaptiveTimer struct {
+	timerConfig
+	logger          log.ContextLogger
+	network         adapter.NetworkManager
+	connections     adapter.ConnectionManager
+	cacheFile       adapter.CacheFile
+	recorder        *Recorder
+	limitThresholds pressureThresholds
+
+	access sync.Mutex
+	timer  *time.Timer
+	timerState
+}
+
+func newAdaptiveTimer(logger log.ContextLogger, network adapter.NetworkManager, connections adapter.ConnectionManager, cacheFile adapter.CacheFile, recorder *Recorder, config timerConfig) *adaptiveTimer {
 	t := &adaptiveTimer{
 		timerConfig: config,
 		logger:      logger,
 		network:     network,
-		onTriggered: onTriggered,
+		connections: connections,
+		cacheFile:   cacheFile,
+		recorder:    recorder,
 	}
 	if config.policyMode == policyModeMemoryLimit || config.policyMode == policyModeNetworkExtension {
 		t.limitThresholds = computeLimitThresholds(config.memoryLimit, config.safetyMargin)
@@ -128,9 +136,17 @@ func newAdaptiveTimer(logger log.ContextLogger, network adapter.NetworkManager, 
 	return t
 }
 
-func (t *adaptiveTimer) start() {
+func (t *adaptiveTimer) start(carriedState *timerState) {
 	t.access.Lock()
 	defer t.access.Unlock()
+	if t.timer != nil {
+		return
+	}
+	if carriedState != nil {
+		t.timerState = *carriedState
+		t.timer = time.AfterFunc(t.minInterval, t.poll)
+		return
+	}
 	t.startLocked()
 }
 
@@ -143,13 +159,14 @@ func (t *adaptiveTimer) startLocked() {
 	t.timer = time.AfterFunc(t.minInterval, t.poll)
 }
 
-func (t *adaptiveTimer) stop() {
+func (t *adaptiveTimer) stop() timerState {
 	t.access.Lock()
 	defer t.access.Unlock()
 	if t.timer != nil {
 		t.timer.Stop()
 		t.timer = nil
 	}
+	return t.timerState
 }
 
 func (t *adaptiveTimer) poll() {
@@ -192,14 +209,24 @@ func (t *adaptiveTimer) poll() {
 			}
 		}
 	}
+	state := t.state
 	t.access.Unlock()
+	var connections int
+	if t.connections != nil {
+		connections = t.connections.Count()
+	}
+	if t.recorder != nil {
+		t.recorder.sample(sample, state, connections)
+		if state != previousState {
+			t.recorder.recordStateChange(state, sample)
+		}
+	}
 	if !triggered {
 		return
 	}
-	if t.onTriggered != nil {
-		t.onTriggered(sample.usage)
-	}
+	var reason string
 	if rateTriggered {
+		reason = resetReasonRate
 		if t.killerDisabled {
 			t.logger.Warn("memory growth rate critical (report only), usage: ", byteformats.FormatMemoryBytes(sample.usage), t.logDetails(sample))
 		} else {
@@ -207,12 +234,36 @@ func (t *adaptiveTimer) poll() {
 			t.network.ResetNetwork(context.Background())
 		}
 	} else {
+		reason = resetReasonThreshold
 		if t.killerDisabled {
 			t.logger.Warn("memory threshold reached (report only), usage: ", byteformats.FormatMemoryBytes(sample.usage), t.logDetails(sample))
 		} else {
 			t.logger.Error("memory threshold reached, usage: ", byteformats.FormatMemoryBytes(sample.usage), t.logDetails(sample), ", resetting network")
 			t.network.ResetNetwork(context.Background())
 		}
+	}
+	t.releaseMemory()
+	if t.recorder != nil {
+		after := readMemorySample(t.policyMode)
+		t.recorder.recordReset(reason, sample, after, connections, t.killerDisabled)
+		t.recorder.snapshot(SnapshotReasonReset, sample, t.belowTrigger(after), false)
+	}
+}
+
+func (t *adaptiveTimer) belowTrigger(sample memorySample) bool {
+	switch t.policyMode {
+	case policyModeMemoryLimit, policyModeNetworkExtension:
+		return sample.usage < t.limitThresholds.trigger
+	case policyModeAvailable:
+		return !sample.availableKnown || sample.available > t.availableThresholds(sample).trigger
+	default:
+		return true
+	}
+}
+
+func (t *adaptiveTimer) releaseMemory() {
+	if t.cacheFile != nil {
+		t.cacheFile.Flush()
 	}
 	badCleanup()
 	runtimeDebug.FreeOSMemory()
@@ -320,9 +371,20 @@ func readMemorySample(mode policyMode) memorySample {
 	sample := memorySample{
 		usage: memory.Total(),
 	}
-	if mode == policyModeAvailable {
+	if mode == policyModeAvailable || mode == policyModeNetworkExtension {
 		sample.availableKnown = true
 		sample.available = memory.Available()
 	}
 	return sample
+}
+
+func (s pressureState) String() string {
+	switch s {
+	case pressureStateArmed:
+		return "armed"
+	case pressureStateTriggered:
+		return "triggered"
+	default:
+		return "normal"
+	}
 }

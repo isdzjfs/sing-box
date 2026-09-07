@@ -25,11 +25,13 @@ type ManagedTransport struct {
 	factory       func() (innerTransport, error)
 	cheapRebuild  bool
 
-	dialer        N.Dialer
-	headers       http.Header
-	host          string
-	tag           string
-	cacheIdentity string
+	dialer          N.Dialer
+	headers         http.Header
+	host            string
+	tag             string
+	detour          string
+	defaultOutbound bool
+	cacheIdentity   string
 }
 
 type transportEpoch struct {

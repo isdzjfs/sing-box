@@ -20,10 +20,10 @@ import (
 	"github.com/sagernet/sing-box/experimental/locale"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/memory"
 	"github.com/sagernet/sing/common/observable"
-	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 
 	"github.com/gofrs/uuid/v5"
@@ -47,7 +47,6 @@ type StartedService struct {
 	// platform adapter.PlatformInterface
 	handler           PlatformHandler
 	debug             bool
-	logMaxLines       int
 	oomKillerEnabled  bool
 	oomKillerDisabled bool
 	oomMemoryLimit    uint64
@@ -61,7 +60,7 @@ type StartedService struct {
 	serviceStatusSubscriber *observable.Subscriber[*ServiceStatus]
 	serviceStatusObserver   *observable.Observer[*ServiceStatus]
 	logAccess               sync.RWMutex
-	logLines                list.List[*log.Entry]
+	logLines                logRing
 	logSubscriber           *observable.Subscriber[*log.Entry]
 	logObserver             *observable.Observer[*log.Entry]
 	instance                *Instance
@@ -96,7 +95,7 @@ func NewStartedService(options ServiceOptions) *StartedService {
 		// platform:                options.Platform,
 		handler:           options.Handler,
 		debug:             options.Debug,
-		logMaxLines:       options.LogMaxLines,
+		logLines:          logRing{maxLines: options.LogMaxLines},
 		oomKillerEnabled:  options.OOMKillerEnabled,
 		oomKillerDisabled: options.OOMKillerDisabled,
 		oomMemoryLimit:    options.OOMMemoryLimit,
@@ -137,7 +136,7 @@ func (s *StartedService) GetVersion(ctx context.Context, empty *emptypb.Empty) (
 
 func (s *StartedService) resetLogs() {
 	s.logAccess.Lock()
-	s.logLines = list.List[*log.Entry]{}
+	s.logLines.reset()
 	s.logAccess.Unlock()
 	s.logSubscriber.Emit(nil)
 }
@@ -251,9 +250,9 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 	// bootstrap DNS used to initialize proxy-routed remote rule sets.
 	if oldInstance == nil {
 		s.updateStatus(ServiceStatus_STARTING)
+		s.resetLogs()
 	}
-	s.resetLogs()
-	instance, err := s.newInstance(ctx, profileContent, options)
+	instance, err := s.newInstance(ctx, profileContent, options, oldInstance != nil)
 	if err != nil {
 		if oldInstance != nil {
 			s.serviceAccess.Unlock()
@@ -265,6 +264,11 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 		s.instance = nil
 		s.updateStatus(ServiceStatus_STOPPING)
 		s.serviceAccess.Unlock()
+		oomRecorder := service.FromContext[*oomkiller.Recorder](s.ctx)
+		if oomRecorder != nil {
+			oomRecorder.BeginReload()
+			defer oomRecorder.EndReload()
+		}
 		_ = oldInstance.Close()
 		runtimeDebug.FreeOSMemory()
 		s.serviceAccess.Lock()
@@ -272,8 +276,8 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 	}
 	s.instance = instance
 	instance.urlTestHistoryStorage.AddUpdateHook(s.urlTestSubscriber)
-	if instance.clashServer != nil {
-		instance.clashServer.AddModeUpdateHook(s.clashModeSubscriber)
+	if instance.clashMode != nil {
+		instance.clashMode.AddUpdateHook(s.clashModeSubscriber)
 	}
 	s.serviceAccess.Unlock()
 	err = instance.Start()
@@ -357,12 +361,8 @@ func (s *StartedService) SubscribeServiceStatus(empty *emptypb.Empty, server grp
 }
 
 func (s *StartedService) SubscribeLog(empty *emptypb.Empty, server grpc.ServerStreamingServer[Log]) error {
-	var savedLines []*log.Entry
 	s.logAccess.Lock()
-	savedLines = make([]*log.Entry, 0, s.logLines.Len())
-	for element := s.logLines.Front(); element != nil; element = element.Next() {
-		savedLines = append(savedLines, element.Value)
-	}
+	savedLines := s.logLines.array()
 	subscription, done, err := s.logObserver.Subscribe()
 	s.logAccess.Unlock()
 	if err != nil {
@@ -622,14 +622,14 @@ func (s *StartedService) GetClashModeStatus(ctx context.Context, empty *emptypb.
 		s.serviceAccess.RUnlock()
 		return nil, os.ErrInvalid
 	}
-	clashServer := s.instance.clashServer
+	clashMode := s.instance.clashMode
 	s.serviceAccess.RUnlock()
-	if clashServer == nil {
+	if clashMode == nil {
 		return nil, status.Error(codes.NotFound, "clash mode not available")
 	}
 	return &ClashModeStatus{
-		ModeList:    clashServer.ModeList(),
-		CurrentMode: clashServer.Mode(),
+		ModeList:    clashMode.ModeList(),
+		CurrentMode: clashMode.Mode(),
 	}, nil
 }
 
@@ -652,12 +652,12 @@ func (s *StartedService) SubscribeClashMode(empty *emptypb.Empty, server grpc.Se
 		s.serviceAccess.RLock()
 		var message *ClashMode
 		if s.serviceStatus.Status == ServiceStatus_STARTED {
-			clashServer := s.instance.clashServer
-			if clashServer == nil {
+			clashMode := s.instance.clashMode
+			if clashMode == nil {
 				s.serviceAccess.RUnlock()
 				return status.Error(codes.NotFound, "clash mode not available")
 			}
-			message = &ClashMode{Mode: clashServer.Mode()}
+			message = &ClashMode{Mode: clashMode.Mode()}
 		} else {
 			message = &ClashMode{}
 		}
@@ -687,12 +687,12 @@ func (s *StartedService) SetClashMode(ctx context.Context, request *ClashMode) (
 		s.serviceAccess.RUnlock()
 		return nil, os.ErrInvalid
 	}
-	clashServer := s.instance.clashServer
+	clashMode := s.instance.clashMode
 	s.serviceAccess.RUnlock()
-	if clashServer == nil {
+	if clashMode == nil {
 		return nil, status.Error(codes.NotFound, "clash mode not available")
 	}
-	clashServer.SetMode(request.Mode)
+	clashMode.SetMode(request.Mode)
 	return &emptypb.Empty{}, nil
 }
 
@@ -1078,8 +1078,10 @@ func buildConnectionProto(metadata *trafficcontrol.TrackerMetadata) *Connection 
 			ProcessId:    metadata.Metadata.ProcessInfo.ProcessID,
 			UserId:       metadata.Metadata.ProcessInfo.UserId,
 			UserName:     metadata.Metadata.ProcessInfo.UserName,
-			ProcessPath:  metadata.Metadata.ProcessInfo.ProcessPath,
-			PackageNames: metadata.Metadata.ProcessInfo.AndroidPackageNames,
+			PackageNames: metadata.Metadata.ProcessInfo.PackageNames,
+		}
+		if len(metadata.Metadata.ProcessInfo.ProcessPaths) > 0 {
+			processInfo.ProcessPath = metadata.Metadata.ProcessInfo.ProcessPaths[0]
 		}
 	}
 	return &Connection{
@@ -2125,10 +2127,7 @@ func (s *StartedService) mustEmbedUnimplementedStartedServiceServer() {
 func (s *StartedService) WriteMessage(level log.Level, message string) {
 	item := &log.Entry{Level: level, Message: message}
 	s.logAccess.Lock()
-	s.logLines.PushBack(item)
-	if s.logLines.Len() > s.logMaxLines {
-		s.logLines.Remove(s.logLines.Front())
-	}
+	s.logLines.push(item)
 	s.logAccess.Unlock()
 	s.logSubscriber.Emit(item)
 	if s.debug {
@@ -2139,7 +2138,7 @@ func (s *StartedService) WriteMessage(level log.Level, message string) {
 func (s *StartedService) SavedLog() []*log.Entry {
 	s.logAccess.RLock()
 	defer s.logAccess.RUnlock()
-	return s.logLines.Array()
+	return s.logLines.array()
 }
 
 func (s *StartedService) Instance() *Instance {

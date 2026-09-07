@@ -36,10 +36,16 @@ type CommandServer struct {
 	platformInterface PlatformInterface
 	platformWrapper   *platformInterfaceWrapper
 	powerManager      *powerreport.Manager
+	oomRecorder       *oomkiller.Recorder
 	grpcServer        *grpc.Server
 	listener          net.Listener
 	endPauseTimer     *time.Timer
+	sleepAt           time.Time
 }
+
+// iOS wakes the extension for every push and background task; in collected power reports
+// most sleeps last under two minutes and none exceeded ten.
+const closeIdleConnectionsAfterSleep = 2 * time.Minute
 
 type CommandServerHandler interface {
 	ServiceStop() error
@@ -83,12 +89,14 @@ func NewCommandServer(handler CommandServerHandler, platformInterface PlatformIn
 		// GroupID:          sGroupID,
 		// SystemProxyEnabled: false,
 	})
-	reporter := &oomReporter{startedService: server.StartedService}
-	service.MustRegister[oomkiller.OOMReporter](ctx, reporter)
+	oomRecorder := oomkiller.NewRecorder(OOMRecorderOptions(server.StartedService))
+	service.MustRegister[*oomkiller.Recorder](ctx, oomRecorder)
+	oomRecorder.Start()
+	server.oomRecorder = oomRecorder
 	server.managedService = daemon.NewManagedService(daemon.ManagedServiceOptions{
 		Handler:     (*platformHandler)(server),
 		Debug:       sDebug,
-		OOMReporter: reporter,
+		OOMRecorder: oomRecorder,
 	})
 	if sPowerReportEnabled {
 		err := powerManager.Start(PowerReportOptions(server.StartedService))
@@ -190,11 +198,15 @@ func (s *CommandServer) Start() error {
 }
 
 func (s *CommandServer) Close() {
+	if s.endPauseTimer != nil {
+		s.endPauseTimer.Stop()
+	}
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
 	}
 	common.Close(s.listener)
 	s.StartedService.Close()
+	s.oomRecorder.Close()
 	s.powerManager.Close()
 }
 
@@ -249,9 +261,10 @@ func (s *CommandServer) NeedFindProcess() bool {
 }
 
 func (s *CommandServer) Pause() {
+	s.sleepAt = time.Now().Round(0)
 	recorder := s.powerManager.Recorder()
 	if recorder != nil {
-		recorder.RecordPlatformEvent("ne-sleep")
+		recorder.RecordDeviceSleep()
 	}
 	instance := s.StartedService.Instance()
 	if instance == nil || instance.PauseManager() == nil {
@@ -259,22 +272,38 @@ func (s *CommandServer) Pause() {
 	}
 	instance.PauseManager().DevicePause()
 	if C.IsIos {
+		// iOS calls wake within seconds of sleep while the device stays locked, so wake is
+		// ignored and the pause ends one minute after the last sleep instead. Go timers on
+		// darwin run on CLOCK_UPTIME_RAW, which does not advance while the device sleeps,
+		// so the minute counts awake time only and never expires inside a sleep.
 		if s.endPauseTimer == nil {
-			s.endPauseTimer = time.AfterFunc(time.Minute, instance.PauseManager().DeviceWake)
+			s.endPauseTimer = time.AfterFunc(time.Minute, s.endDevicePause)
 		} else {
 			s.endPauseTimer.Reset(time.Minute)
 		}
 	}
 }
 
-func (s *CommandServer) Wake() {
-	recorder := s.powerManager.Recorder()
-	if recorder != nil {
-		recorder.RecordPlatformEvent("ne-wake")
-	}
+func (s *CommandServer) endDevicePause() {
 	instance := s.StartedService.Instance()
 	if instance == nil || instance.PauseManager() == nil {
 		return
+	}
+	instance.PauseManager().DeviceWake()
+}
+
+func (s *CommandServer) Wake() {
+	wakeAt := time.Now().Round(0)
+	recorder := s.powerManager.Recorder()
+	if recorder != nil {
+		recorder.RecordDeviceWake()
+	}
+	instance := s.StartedService.Instance()
+	if instance == nil || instance.Box() == nil || instance.PauseManager() == nil {
+		return
+	}
+	if !s.sleepAt.IsZero() && wakeAt.Sub(s.sleepAt) >= closeIdleConnectionsAfterSleep {
+		instance.Box().CloseIdleConnections()
 	}
 	if !C.IsIos {
 		instance.PauseManager().DeviceWake()

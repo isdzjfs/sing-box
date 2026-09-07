@@ -28,6 +28,7 @@ func RegisterSelector(registry *outbound.Registry) {
 var (
 	_ adapter.OutboundGroup           = (*Selector)(nil)
 	_ adapter.OutboundGroupIcon       = (*Selector)(nil)
+	_ adapter.Referrer                = (*Selector)(nil)
 	_ adapter.ConnectionHandler       = (*Selector)(nil)
 	_ adapter.PacketConnectionHandler = (*Selector)(nil)
 )
@@ -147,6 +148,10 @@ func (s *Selector) Icon() string {
 
 func (s *Selector) InterruptsExternalConnections() bool {
 	return s.interruptExternalConnections
+}
+
+func (s *Selector) References() []string {
+	return []string{s.Now()}
 }
 
 func (s *Selector) SelectOutbound(tag string) bool {
