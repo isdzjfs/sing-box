@@ -4,6 +4,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // ruleSetReferencer is satisfied by every concrete rule type, because they all embed either
@@ -156,12 +157,8 @@ func classifyOutboundInstance(
 			}
 			visited[tag] = true
 		}
-		selectedTag := group.Now()
-		if selectedTag == "" {
-			return outboundClassProxy, false
-		}
-		selected, loaded := outboundManager.Outbound(selectedTag)
-		if !loaded {
+		selected := group.Selected(N.NetworkTCP)
+		if selected == nil {
 			return outboundClassProxy, false
 		}
 		return classifyOutboundInstance(outboundManager, selected, visited)

@@ -3,6 +3,7 @@ package trafficcontrol
 import (
 	"context"
 	"net"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -66,32 +67,20 @@ func (m *Manager) RoutedFlow(ctx context.Context, metadata adapter.InboundContex
 
 func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, upload *atomic.Int64, download *atomic.Int64) TrackerMetadata {
 	id, _ := uuid.NewV4()
-	var (
-		chain        []string
-		next         string
-		outbound     string
-		outboundType string
-	)
-	if matchOutbound != nil {
-		next = matchOutbound.Tag()
+	chain := common.Map(metadata.OutboundChain, adapter.Outbound.Tag)
+	slices.Reverse(chain)
+	var outbound adapter.Outbound
+	if len(metadata.OutboundChain) > 0 {
+		outbound = metadata.OutboundChain[len(metadata.OutboundChain)-1]
 	} else {
-		next = m.outbound.Default().Tag()
+		outbound = matchOutbound
+		if outbound != nil {
+			chain = []string{outbound.Tag()}
+		}
 	}
-	visited := make(map[string]bool)
-	for next != "" && !visited[next] {
-		visited[next] = true
-		detour, loaded := m.outbound.Outbound(next)
-		if !loaded {
-			break
-		}
-		chain = append(chain, next)
-		outbound = detour.Tag()
-		outboundType = detour.Type()
-		outboundGroup, isGroup := detour.(adapter.OutboundGroup)
-		if !isGroup {
-			break
-		}
-		next = adapter.OutboundGroupNow(outboundGroup, metadata.Network)
+	var outboundTag, outboundType string
+	if outbound != nil {
+		outboundTag, outboundType = outbound.Tag(), outbound.Type()
 	}
 	return TrackerMetadata{
 		ID:           id,
@@ -99,9 +88,9 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 		CreatedAt:    time.Now(),
 		Upload:       upload,
 		Download:     download,
-		Chain:        common.Reverse(chain),
+		Chain:        chain,
 		Rule:         matchedRule,
-		Outbound:     outbound,
+		Outbound:     outboundTag,
 		OutboundType: outboundType,
 	}
 }

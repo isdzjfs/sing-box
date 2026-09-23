@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"io"
 	"net"
 	"slices"
 	"sync"
@@ -154,6 +155,14 @@ func (s *Selector) References() []string {
 	return []string{s.Now()}
 }
 
+func (s *Selector) Selected(network string) adapter.Outbound {
+	return s.selected.Load()
+}
+
+func (s *Selector) AttachConnection(closer io.Closer) func() {
+	return s.interruptGroup.Add(closer, true)
+}
+
 func (s *Selector) SelectOutbound(tag string) bool {
 	s.access.RLock()
 	detour, loaded := s.outbounds[tag]
@@ -282,7 +291,15 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 }
 
-func RealTag(outboundManager adapter.OutboundManager, detour adapter.Outbound) string {
-	tag, _ := URLTestHistoryScope(outboundManager, detour, N.NetworkTCP, "")
-	return tag
+func RealTag(detour adapter.Outbound, network string) string {
+	visited := make(map[adapter.Outbound]bool)
+	for detour != nil && !visited[detour] {
+		visited[detour] = true
+		group, isGroup := detour.(adapter.OutboundGroup)
+		if !isGroup {
+			return detour.Tag()
+		}
+		detour = group.Selected(network)
+	}
+	return ""
 }

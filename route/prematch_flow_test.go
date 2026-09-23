@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"testing"
@@ -19,7 +20,7 @@ func TestPreMatchFlowStopsAtInterruptibleOutboundGroup(t *testing.T) {
 	flowOutbound := &preMatchFlowTestOutbound{tag: "flow"}
 	group := &preMatchFlowTestGroup{
 		tag:                          "auto",
-		selected:                     flowOutbound.Tag(),
+		selected:                     flowOutbound,
 		interruptExternalConnections: true,
 	}
 	router := &Router{
@@ -45,7 +46,7 @@ func TestPreMatchFlowExpandsNonInterruptibleOutboundGroup(t *testing.T) {
 	flowOutbound := &preMatchFlowTestOutbound{tag: "flow"}
 	group := &preMatchFlowTestGroup{
 		tag:      "auto",
-		selected: flowOutbound.Tag(),
+		selected: flowOutbound,
 	}
 	router := &Router{
 		logger: log.NewNOPFactory().NewLogger("router"),
@@ -107,7 +108,7 @@ func (m *preMatchFlowTestOutboundManager) Create(ctx context.Context, router ada
 
 type preMatchFlowTestGroup struct {
 	tag                          string
-	selected                     string
+	selected                     adapter.Outbound
 	interruptExternalConnections bool
 }
 
@@ -136,11 +137,16 @@ func (g *preMatchFlowTestGroup) ListenPacket(ctx context.Context, destination M.
 }
 
 func (g *preMatchFlowTestGroup) Now() string {
-	return g.selected
+	return g.selected.Tag()
 }
 
 func (g *preMatchFlowTestGroup) All() []string {
-	return []string{g.selected}
+	return []string{g.selected.Tag()}
+}
+
+func (g *preMatchFlowTestGroup) Selected(string) adapter.Outbound { return g.selected }
+func (g *preMatchFlowTestGroup) AttachConnection(io.Closer) func() {
+	return func() {}
 }
 
 func (g *preMatchFlowTestGroup) InterruptsExternalConnections() bool {

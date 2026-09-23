@@ -165,6 +165,38 @@ func TestURLTestNowMustDescribeColdStartDialFallback(t *testing.T) {
 	}
 }
 
+func TestURLTestRoutedConnectionUsesSelectionGeneration(t *testing.T) {
+	ctx := newTestURLTestContext()
+	old := &testURLTestOutbound{tag: "old"}
+	fresh := &testURLTestOutbound{tag: "fresh"}
+	manager := &testURLTestOutboundManager{outbounds: map[string]adapter.Outbound{"old": old, "fresh": fresh}}
+	g, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{old, fresh}, "", time.Minute, 50, time.Minute, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	setTestSelectedTCP(g, old)
+	outbound := &URLTest{group: g}
+	oldConn := &testURLTestConn{}
+	detachOld := outbound.AttachConnection(oldConn)
+	defer detachOld()
+	updated, generation := g.applySelectedUpdate(fresh, true, nil, false)
+	if !updated {
+		t.Fatal("selection change was not recorded")
+	}
+	g.interruptGroup.InterruptBefore(generation, true)
+	if !oldConn.Closed() {
+		t.Fatal("routed connection from the old selection stayed open")
+	}
+	freshConn := &testURLTestConn{}
+	detachFresh := outbound.AttachConnection(freshConn)
+	defer detachFresh()
+	g.interruptGroup.InterruptBefore(generation, true)
+	if freshConn.Closed() {
+		t.Fatal("connection attached after the selection change was interrupted")
+	}
+}
+
 func TestURLTestNestedTCPOnlyGroupMustNotWinUDPSelection(t *testing.T) {
 	ctx := newTestURLTestContext()
 	history := service.PtrFromContext[urltest.HistoryStorage](ctx)

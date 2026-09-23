@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"io"
 	"maps"
 	"net"
 	"slices"
@@ -189,6 +190,26 @@ func (s *URLTest) References() []string {
 		references = append(references, group.selectedOutboundUDP.Tag())
 	}
 	return references
+}
+
+func (s *URLTest) Selected(network string) adapter.Outbound {
+	if s.group == nil {
+		return nil
+	}
+	outbound := s.group.supportedSelectedOutbound(network).outbound
+	if outbound == nil {
+		outbound, _ = s.group.Select(network)
+	}
+	return outbound
+}
+
+func (s *URLTest) AttachConnection(closer io.Closer) func() {
+	s.group.Touch()
+	// Keep registration in the same selection generation as the routed leaf.
+	s.group.selectedAccess.RLock()
+	detach := s.group.interruptGroup.AddWithGeneration(closer, true, s.group.connectionGeneration)
+	s.group.selectedAccess.RUnlock()
+	return detach
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
@@ -772,7 +793,7 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 				return member
 			})), link, interval, force)
 		default:
-			realTag := RealTag(b.outbound, detour)
+			realTag := detour.Tag()
 			if b.checked[realTag] {
 				continue
 			}
@@ -796,6 +817,9 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 					testResult.err = testCtx.Err()
 				}
 				if testResult.err != nil {
+					if b.ctx.Err() != nil {
+						return nil, nil
+					}
 					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
 					b.history.StoreURLTestFailure(realTag, b.checkedAt, link)
 				} else {

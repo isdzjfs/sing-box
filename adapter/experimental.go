@@ -147,8 +147,9 @@ func (s *SavedBinary) UnmarshalBinary(data []byte) error {
 
 type OutboundGroup interface {
 	Outbound
-	Now() string
 	All() []string
+	Selected(network string) Outbound
+	AttachConnection(closer io.Closer) (detach func())
 }
 
 // OutboundGroupUpdater is implemented by groups whose member snapshot can be

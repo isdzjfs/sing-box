@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/memory"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/service"
 
@@ -581,7 +582,9 @@ func (s *StartedService) readGroups() *Groups {
 		g.Tag = iGroup.Tag()
 		g.Type = iGroup.Type()
 		_, g.Selectable = iGroup.(*group.Selector)
-		g.Selected = iGroup.Now()
+		if selected := iGroup.Selected(N.NetworkTCP); selected != nil {
+			g.Selected = selected.Tag()
+		}
 		if boxService.cacheFile != nil {
 			if isExpand, loaded := boxService.cacheFile.LoadGroupExpand(g.Tag); loaded {
 				g.IsExpand = isExpand
@@ -606,7 +609,7 @@ func (s *StartedService) readGroups() *Groups {
 			if testGroup, loaded := iGroup.(*group.URLTest); loaded {
 				links = []string{testGroup.TestURL()}
 			}
-			tag := group.RealTag(boxService.outboundManager, itemOutbound)
+			tag := group.RealTag(itemOutbound, N.NetworkTCP)
 			if _, nested := itemOutbound.(adapter.OutboundGroup); nested {
 				link := ""
 				if len(links) > 0 {
@@ -1231,7 +1234,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					item.Server = serverAddress.AddrString()
 					item.ServerPort = int32(serverAddress.Port)
 				}
-				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(boxService.outboundManager, ob)))
+				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(ob, N.NetworkTCP)))
 				list.Outbounds = append(list.Outbounds, item)
 			}
 			for _, ep := range boxService.endpointManager.Endpoints() {
@@ -1239,7 +1242,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					Tag:  ep.Tag(),
 					Type: ep.Type(),
 				}
-				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(boxService.outboundManager, ep)))
+				setGroupItemURLTest(item, historyStorage.LoadLatestURLTestHistory(group.RealTag(ep, N.NetworkTCP)))
 				list.Outbounds = append(list.Outbounds, item)
 			}
 		}

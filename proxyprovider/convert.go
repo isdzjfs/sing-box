@@ -338,14 +338,14 @@ func convertHysteria(provider option.ProxyProvider, proxy map[string]any, domain
 		if windowErr != nil {
 			return nil, E.Cause(windowErr, "recv-window-conn")
 		}
-		options.StreamReceiveWindow = streamReceiveWindow
+		options.StreamReceiveWindow = &streamReceiveWindow
 	}
 	if receiveWindow := intValue(proxy, "recv-window", "recv_window"); receiveWindow > 0 {
 		connectionReceiveWindow, windowErr := memoryBytesFromInt(receiveWindow)
 		if windowErr != nil {
 			return nil, E.Cause(windowErr, "recv-window")
 		}
-		options.ConnectionReceiveWindow = connectionReceiveWindow
+		options.ConnectionReceiveWindow = &connectionReceiveWindow
 	}
 	if disableMTUDiscovery, loaded := boolValue(proxy, "disable-mtu-discovery", "disable_mtu_discovery"); loaded {
 		options.DisablePathMTUDiscovery = disableMTUDiscovery
@@ -428,14 +428,14 @@ func convertTUIC(provider option.ProxyProvider, proxy map[string]any, domainReso
 		if err != nil {
 			return nil, E.Cause(err, "recv-window-conn")
 		}
-		options.StreamReceiveWindow = streamReceiveWindow
+		options.StreamReceiveWindow = &streamReceiveWindow
 	}
 	if receiveWindow := intValue(proxy, "recv-window", "recv_window"); receiveWindow > 0 {
 		connectionReceiveWindow, err := memoryBytesFromInt(receiveWindow)
 		if err != nil {
 			return nil, E.Cause(err, "recv-window")
 		}
-		options.ConnectionReceiveWindow = connectionReceiveWindow
+		options.ConnectionReceiveWindow = &connectionReceiveWindow
 	}
 	if maxOpenStreams := intValue(proxy, "max-open-streams", "max_open_streams"); maxOpenStreams > 0 {
 		options.MaxConcurrentStreams = maxOpenStreams

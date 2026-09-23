@@ -260,22 +260,25 @@ func (s *CommandServer) NeedFindProcess() bool {
 	return instance.Box().Router().NeedFindProcess()
 }
 
+// iOS may wake the extension briefly while the device is still asleep.
+// Its pause ends after awake time elapses or the platform calls WakeNow.
 func (s *CommandServer) Pause() {
 	s.sleepAt = time.Now().Round(0)
 	recorder := s.powerManager.Recorder()
 	if recorder != nil {
 		recorder.RecordDeviceSleep()
 	}
+	if !(C.IsAndroid || C.IsIos) || C.IsTvOS {
+		return
+	}
 	instance := s.StartedService.Instance()
-	if instance == nil || instance.PauseManager() == nil {
+	if instance == nil || instance.Box() == nil || instance.PauseManager() == nil {
 		return
 	}
 	instance.PauseManager().DevicePause()
 	if C.IsIos {
-		// iOS calls wake within seconds of sleep while the device stays locked, so wake is
-		// ignored and the pause ends one minute after the last sleep instead. Go timers on
-		// darwin run on CLOCK_UPTIME_RAW, which does not advance while the device sleeps,
-		// so the minute counts awake time only and never expires inside a sleep.
+		// iOS may call Wake while the device remains locked. Count awake time
+		// before ending the pause instead of closing idle sessions immediately.
 		if s.endPauseTimer == nil {
 			s.endPauseTimer = time.AfterFunc(time.Minute, s.endDevicePause)
 		} else {
@@ -307,6 +310,28 @@ func (s *CommandServer) Wake() {
 	}
 	if !C.IsIos {
 		instance.PauseManager().DeviceWake()
+	}
+}
+
+func (s *CommandServer) WakeNow() {
+	instance := s.StartedService.Instance()
+	if instance == nil || instance.PauseManager() == nil {
+		return
+	}
+	instance.PauseManager().DeviceWake()
+}
+
+func (s *CommandServer) RecordScreenState(on bool) {
+	recorder := s.powerManager.Recorder()
+	if recorder != nil {
+		recorder.RecordScreenState(on)
+	}
+}
+
+func (s *CommandServer) RecordLockState(locked bool) {
+	recorder := s.powerManager.Recorder()
+	if recorder != nil {
+		recorder.RecordLockState(locked)
 	}
 }
 

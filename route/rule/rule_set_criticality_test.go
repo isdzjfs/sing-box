@@ -2,6 +2,7 @@ package rule
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 
@@ -32,12 +33,19 @@ func (o *criticalityTestOutbound) ListenPacket(context.Context, M.Socksaddr) (ne
 
 type criticalityTestOutboundGroup struct {
 	criticalityTestOutbound
-	selected string
-	all      []string
+	selected  string
+	all       []string
+	outbounds map[string]adapter.Outbound
 }
 
 func (o *criticalityTestOutboundGroup) Now() string   { return o.selected }
 func (o *criticalityTestOutboundGroup) All() []string { return o.all }
+func (o *criticalityTestOutboundGroup) Selected(string) adapter.Outbound {
+	return o.outbounds[o.selected]
+}
+func (o *criticalityTestOutboundGroup) AttachConnection(io.Closer) func() {
+	return func() {}
+}
 
 type criticalityTestOutboundManager struct {
 	outbounds map[string]adapter.Outbound
@@ -129,6 +137,7 @@ func TestCriticalRuleSetTagsSelectorUsesSelectedOutbound(t *testing.T) {
 		selected: "PROXY",
 		all:      []string{"DIRECT", "PROXY"},
 	}
+	manager.outbounds["SELECTOR"].(*criticalityTestOutboundGroup).outbounds = manager.outbounds
 	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "SELECTOR")}
 	critical, known := CriticalRuleSetTags(rules, manager)
 	if !known {
@@ -158,6 +167,7 @@ func TestCriticalRuleSetTagsUnresolvedGroupIsUndetermined(t *testing.T) {
 		},
 		all: []string{"DIRECT", "PROXY"},
 	}
+	manager.outbounds["SELECTOR"].(*criticalityTestOutboundGroup).outbounds = manager.outbounds
 	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "SELECTOR")}
 	if _, known := CriticalRuleSetTags(rules, manager); known {
 		t.Fatal("a group without a selected outbound must fail closed")
@@ -177,6 +187,8 @@ func TestCriticalRuleSetTagsCyclicGroupIsUndetermined(t *testing.T) {
 		selected:                "A",
 		all:                     []string{"A"},
 	}
+	manager.outbounds["A"].(*criticalityTestOutboundGroup).outbounds = manager.outbounds
+	manager.outbounds["B"].(*criticalityTestOutboundGroup).outbounds = manager.outbounds
 	rules := []adapter.Rule{routeRuleOn([]string{"proxy_domain"}, "A")}
 	if _, known := CriticalRuleSetTags(rules, manager); known {
 		t.Fatal("cyclic groups must fail closed")

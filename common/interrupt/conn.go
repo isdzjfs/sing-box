@@ -8,26 +8,12 @@ import (
 	"github.com/sagernet/sing/common/x/list"
 )
 
-/*type GroupedConn interface {
-	MarkAsInternal()
-}
-
-func MarkAsInternal(conn any) {
-	if groupedConn, isGroupConn := common.Cast[GroupedConn](conn); isGroupConn {
-		groupedConn.MarkAsInternal()
-	}
-}*/
-
 type Conn struct {
 	net.Conn
 	group   *Group
 	element *list.Element[*groupConnItem]
 	closed  bool
 }
-
-/*func (c *Conn) MarkAsInternal() {
-	c.element.Value.internal = true
-}*/
 
 func (c *Conn) Close() error {
 	c.group.access.Lock()
@@ -47,7 +33,7 @@ func (c *Conn) RegisterGeneration(isExternal bool, generation uint64) {
 		return
 	}
 	if c.element == nil {
-		c.element = c.group.connections.PushBack(&groupConnItem{c.Conn, isExternal, generation})
+		c.element = c.group.connections.PushBack(&groupConnItem{c, isExternal, generation})
 		return
 	}
 	c.element.Value.isExternal = isExternal
@@ -67,15 +53,15 @@ func (c *Conn) Upstream() any {
 }
 
 type PacketConn struct {
-	net.PacketConn
+	N.NetPacketConn
 	group   *Group
 	element *list.Element[*groupConnItem]
 	closed  bool
 }
 
-/*func (c *PacketConn) MarkAsInternal() {
-	c.element.Value.internal = true
-}*/
+func newPacketConn(group *Group, conn net.PacketConn, element *list.Element[*groupConnItem]) *PacketConn {
+	return &PacketConn{NetPacketConn: bufio.NewPacketConn(conn), group: group, element: element}
+}
 
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()
@@ -85,7 +71,7 @@ func (c *PacketConn) Close() error {
 	}
 	c.closed = true
 	c.group.access.Unlock()
-	return c.PacketConn.Close()
+	return c.NetPacketConn.Close()
 }
 
 func (c *PacketConn) RegisterGeneration(isExternal bool, generation uint64) {
@@ -95,7 +81,7 @@ func (c *PacketConn) RegisterGeneration(isExternal bool, generation uint64) {
 		return
 	}
 	if c.element == nil {
-		c.element = c.group.connections.PushBack(&groupConnItem{c.PacketConn, isExternal, generation})
+		c.element = c.group.connections.PushBack(&groupConnItem{c, isExternal, generation})
 		return
 	}
 	c.element.Value.isExternal = isExternal
@@ -111,7 +97,7 @@ func (c *PacketConn) WriterReplaceable() bool {
 }
 
 func (c *PacketConn) Upstream() any {
-	return bufio.NewPacketConn(c.PacketConn)
+	return c.NetPacketConn
 }
 
 type NetworkPacketConn struct {
@@ -139,7 +125,7 @@ func (c *NetworkPacketConn) RegisterGeneration(isExternal bool, generation uint6
 		return
 	}
 	if c.element == nil {
-		c.element = c.group.connections.PushBack(&groupConnItem{c.PacketConn, isExternal, generation})
+		c.element = c.group.connections.PushBack(&groupConnItem{c, isExternal, generation})
 		return
 	}
 	c.element.Value.isExternal = isExternal

@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"io"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -20,6 +21,10 @@ type chainGroup struct{ chainOutbound }
 func (g *chainGroup) Now() string                         { return "tcp-node" }
 func (g *chainGroup) All() []string                       { return []string{"tcp-node", "udp-node"} }
 func (g *chainGroup) NowForNetwork(network string) string { return network + "-node" }
+func (g *chainGroup) Selected(network string) adapter.Outbound {
+	return &chainOutbound{tag: network + "-node"}
+}
+func (g *chainGroup) AttachConnection(io.Closer) func() { return func() {} }
 
 type chainManager struct {
 	adapter.OutboundManager

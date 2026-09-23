@@ -28,6 +28,21 @@ func (g *Group) NewPendingConn(conn net.Conn) *Conn {
 	return &Conn{Conn: conn, group: g}
 }
 
+func (g *Group) Add(closer io.Closer, isExternal bool) (remove func()) {
+	return g.AddWithGeneration(closer, isExternal, 0)
+}
+
+func (g *Group) AddWithGeneration(closer io.Closer, isExternal bool, generation uint64) (remove func()) {
+	g.access.Lock()
+	element := g.connections.PushBack(&groupConnItem{closer, isExternal, generation})
+	g.access.Unlock()
+	return func() {
+		g.access.Lock()
+		g.connections.Remove(element)
+		g.access.Unlock()
+	}
+}
+
 func (g *Group) NewConn(conn net.Conn, isExternal bool) net.Conn {
 	return g.NewConnWithGeneration(conn, isExternal, 0)
 }
@@ -39,7 +54,7 @@ func (g *Group) NewConnWithGeneration(conn net.Conn, isExternal bool, generation
 }
 
 func (g *Group) NewPendingPacketConn(conn net.PacketConn) *PacketConn {
-	return &PacketConn{PacketConn: conn, group: g}
+	return newPacketConn(g, conn, nil)
 }
 
 func (g *Group) NewPacketConn(conn net.PacketConn, isExternal bool) net.PacketConn {
@@ -76,17 +91,18 @@ func (g *Group) InterruptBefore(generation uint64, interruptExternalConnections 
 
 func (g *Group) interrupt(generation uint64, filterGeneration bool, interruptExternalConnections bool) {
 	g.access.Lock()
-	defer g.access.Unlock()
-	var toDelete []*list.Element[*groupConnItem]
-	for element := g.connections.Front(); element != nil; element = element.Next() {
+	var closers []io.Closer
+	for element := g.connections.Front(); element != nil; {
+		nextElement := element.Next()
 		item := element.Value
-		if (filterGeneration && item.generation >= generation) || (item.isExternal && !interruptExternalConnections) {
-			continue
+		if (!filterGeneration || item.generation < generation) && (!item.isExternal || interruptExternalConnections) {
+			closers = append(closers, item.conn)
+			g.connections.Remove(element)
 		}
-		item.conn.Close()
-		toDelete = append(toDelete, element)
+		element = nextElement
 	}
-	for _, element := range toDelete {
-		g.connections.Remove(element)
+	g.access.Unlock()
+	for _, closer := range closers {
+		_ = closer.Close()
 	}
 }

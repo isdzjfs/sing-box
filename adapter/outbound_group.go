@@ -10,5 +10,8 @@ func OutboundGroupNow(group OutboundGroup, network string) string {
 	if networkGroup, loaded := group.(OutboundGroupForNetwork); loaded {
 		return networkGroup.NowForNetwork(network)
 	}
-	return group.Now()
+	if selected := group.Selected(network); selected != nil {
+		return selected.Tag()
+	}
+	return ""
 }
