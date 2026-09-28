@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,10 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		m.logger.ErrorContext(ctx, err)
 		return
 	}
+	var remoteAddress net.Addr
+	if remoteConn != nil {
+		remoteAddress = remoteConn.RemoteAddr()
+	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
 	if err != nil {
 		err = E.Cause(err, "report handshake success")
@@ -162,14 +167,14 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	}
 	serverFirst := sniff.Skip(&metadata)
 	var done atomic.Bool
-	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, false, &done, onClose) {
+	if m.kickWriteHandshake(ctx, conn, remoteConn, serverFirst, false, this, remoteConn, remoteAddress, &done, onClose) {
 		return
 	}
-	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, true, &done, onClose) {
+	if m.kickWriteHandshake(ctx, remoteConn, conn, serverFirst, true, this, remoteConn, remoteAddress, &done, onClose) {
 		return
 	}
-	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
-	go m.connectionCopy(ctx, remoteConn, conn, true, &done, onClose)
+	go m.connectionCopy(ctx, conn, remoteConn, false, this, remoteConn, remoteAddress, &done, onClose)
+	go m.connectionCopy(ctx, remoteConn, conn, true, this, remoteConn, remoteAddress, &done, onClose)
 }
 
 func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -289,7 +294,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
-func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, dialer N.Dialer, remoteConn net.Conn, remoteAddress net.Addr, done *atomic.Bool, onClose N.CloseHandlerFunc) {
 	_, err := bufio.CopyWithIncreateBuffer(destination, source, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
 	if err != nil {
 		common.Close(source, destination)
@@ -315,7 +320,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 		if err == nil {
 			m.logger.DebugContext(ctx, "connection upload finished")
 		} else if !E.IsClosedOrCanceled(err) {
-			m.logger.ErrorContext(ctx, "connection upload closed: ", err)
+			m.logger.ErrorContext(ctx, "connection upload closed", formatConnectionDiagnosticsFromContext(ctx, dialer, remoteConn, remoteAddress), ": ", err)
 		} else {
 			m.logger.TraceContext(ctx, "connection upload closed")
 		}
@@ -323,14 +328,14 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 		if err == nil {
 			m.logger.DebugContext(ctx, "connection download finished")
 		} else if !E.IsClosedOrCanceled(err) {
-			m.logger.ErrorContext(ctx, "connection download closed: ", err)
+			m.logger.ErrorContext(ctx, "connection download closed", formatConnectionDiagnosticsFromContext(ctx, dialer, remoteConn, remoteAddress), ": ", err)
 		} else {
 			m.logger.TraceContext(ctx, "connection download closed")
 		}
 	}
 }
 
-func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
+func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.Conn, destination net.Conn, serverFirst bool, direction bool, dialer N.Dialer, remoteConn net.Conn, remoteAddress net.Addr, done *atomic.Bool, onClose N.CloseHandlerFunc) bool {
 	if !N.NeedHandshakeForWrite(destination) {
 		return false
 	}
@@ -381,11 +386,103 @@ func (m *ConnectionManager) kickWriteHandshake(ctx context.Context, source net.C
 	}
 	common.Close(source, destination)
 	if !direction {
-		m.logger.ErrorContext(ctx, "connection upload handshake: ", err)
+		m.logger.ErrorContext(ctx, "connection upload handshake", formatConnectionDiagnosticsFromContext(ctx, dialer, remoteConn, remoteAddress), ": ", err)
 	} else {
-		m.logger.ErrorContext(ctx, "connection download handshake: ", err)
+		m.logger.ErrorContext(ctx, "connection download handshake", formatConnectionDiagnosticsFromContext(ctx, dialer, remoteConn, remoteAddress), ": ", err)
 	}
 	return true
+}
+
+func formatConnectionDiagnosticsFromContext(ctx context.Context, dialer N.Dialer, remoteConn net.Conn, remoteAddress net.Addr) string {
+	metadata := adapter.ContextFrom(ctx)
+	if metadata == nil {
+		return formatConnectionDiagnostics(adapter.InboundContext{}, dialer, remoteConn, remoteAddress)
+	}
+	return formatConnectionDiagnostics(*metadata, dialer, remoteConn, remoteAddress)
+}
+
+func formatConnectionDiagnostics(metadata adapter.InboundContext, dialer N.Dialer, remoteConn net.Conn, remoteAddress net.Addr) string {
+	var fields []string
+	if metadata.Destination.IsValid() {
+		fields = append(fields, connectionDiagnosticField("destination", metadata.Destination.String()))
+	}
+	if metadata.Domain != "" && metadata.Domain != metadata.Destination.Fqdn {
+		fields = append(fields, connectionDiagnosticField("domain", metadata.Domain))
+	}
+	if metadata.Protocol != "" {
+		fields = append(fields, connectionDiagnosticField("protocol", metadata.Protocol))
+	}
+	if metadata.RouteOutbound != "" {
+		fields = append(fields, connectionDiagnosticField("route_outbound", metadata.RouteOutbound))
+	}
+	if outbound, isOutbound := dialer.(adapter.Outbound); isOutbound {
+		fields = append(fields, connectionDiagnosticField("dialer", outbound.Type()+"["+outbound.Tag()+"]"))
+	}
+	if len(metadata.OutboundChain) > 0 {
+		const maxChainLength = 8
+		chainLength := min(len(metadata.OutboundChain), maxChainLength)
+		chain := make([]string, 0, chainLength+1)
+		for _, outbound := range metadata.OutboundChain[:chainLength] {
+			if outbound == nil {
+				chain = append(chain, "unknown")
+				continue
+			}
+			chain = append(chain, outbound.Type()+"["+outbound.Tag()+"]")
+		}
+		if len(metadata.OutboundChain) > maxChainLength {
+			chain = append(chain, "...")
+		}
+		fields = append(fields, connectionDiagnosticField("route_chain", strings.Join(chain, " > ")))
+	}
+	if selectedChain := connectionSelectedOutboundChain(remoteConn); len(selectedChain) > 0 {
+		fields = append(fields, connectionDiagnosticField("selected_chain", strings.Join(selectedChain, " > ")))
+	}
+	if remoteAddress != nil {
+		fields = append(fields, connectionDiagnosticField("remote", remoteAddress.String()))
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(fields, ", ") + ")"
+}
+
+func connectionSelectedOutboundChain(conn net.Conn) []string {
+	const maxChainLength = 8
+	var (
+		current any = conn
+		chain   []string
+	)
+	for depth := 0; current != nil && depth < 32; depth++ {
+		if selected, loaded := current.(interface {
+			SelectedOutbound() (outboundType string, outboundTag string, loaded bool)
+		}); loaded {
+			outboundType, outboundTag, hasSelection := selected.SelectedOutbound()
+			if hasSelection {
+				if len(chain) == maxChainLength {
+					chain = append(chain, "...")
+					break
+				}
+				chain = append(chain, outboundType+"["+outboundTag+"]")
+			}
+		}
+		upstream, loaded := current.(interface{ Upstream() any })
+		if !loaded {
+			break
+		}
+		current = upstream.Upstream()
+	}
+	return chain
+}
+
+func connectionDiagnosticField(name string, value string) string {
+	// Outbound tags and sniffed domains are user-controlled. Quote controls and
+	// cap their size before adding them to an error-level log entry.
+	const maxRunes = 256
+	valueRunes := []rune(value)
+	if len(valueRunes) > maxRunes {
+		value = string(valueRunes[:maxRunes]) + "..."
+	}
+	return name + "=" + strconv.Quote(value)
 }
 
 func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.PacketReader, destination N.PacketWriter, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {

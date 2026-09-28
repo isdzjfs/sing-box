@@ -220,6 +220,14 @@ func TestURLTestDiscardsConnectionDialedByStaleOutbound(t *testing.T) {
 	require.False(t, freshConn.Closed())
 	require.Equal(t, int32(1), staleOutbound.dialCount.Load())
 	require.Equal(t, int32(1), freshOutbound.dialCount.Load())
+	selectedConn, loaded := conn.(interface {
+		SelectedOutbound() (outboundType string, outboundTag string, loaded bool)
+	})
+	require.True(t, loaded)
+	outboundType, outboundTag, loaded := selectedConn.SelectedOutbound()
+	require.True(t, loaded)
+	require.Equal(t, "test", outboundType)
+	require.Equal(t, "fresh", outboundTag)
 
 	require.NoError(t, conn.Close())
 	require.True(t, freshConn.Closed())

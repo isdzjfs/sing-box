@@ -115,6 +115,15 @@ type ECHClientConfig struct {
 	lastUpdate      time.Time
 }
 
+func (s *ECHClientConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	diagnostics := clientHandshakeDiagnostics{Engine: clientConfigType(s.ECHCapableConfig)}
+	if provider, loaded := s.ECHCapableConfig.(clientHandshakeDiagnosticsProvider); loaded {
+		diagnostics = provider.clientHandshakeDiagnostics()
+	}
+	diagnostics.Capabilities = append(diagnostics.Capabilities, "ech")
+	return diagnostics
+}
+
 func (s *ECHClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
 	tlsConn, err := s.fetchAndHandshake(ctx, conn)
 	if err != nil {

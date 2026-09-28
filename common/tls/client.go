@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/sagernet/sing-box/common/badtls"
@@ -111,7 +113,7 @@ func NewClientWithOptions(options ClientOptions) (Config, error) {
 func ClientHandshake(ctx context.Context, conn net.Conn, config Config) (Conn, error) {
 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, config)
 	if err != nil {
-		return nil, err
+		return nil, wrapClientHandshakeError(err, conn, config)
 	}
 	readWaitConn, err := badtls.NewReadWaitConn(tlsConn)
 	if err == nil {
@@ -158,17 +160,127 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 	}
 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, d.config)
 	if err != nil {
-		conn.Close()
 		var echErr *tls.ECHRejectionError
 		if echRetry && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if echConfig, isECH := d.config.(ECHCapableConfig); isECH {
+				conn.Close()
 				echConfig.SetECHConfigList(echErr.RetryConfigList)
 				return d.dialContext(ctx, destination, false)
 			}
 		}
-		return nil, err
+		handshakeErr := wrapClientHandshakeError(err, conn, d.config)
+		conn.Close()
+		return nil, handshakeErr
 	}
 	return tlsConn, nil
+}
+
+type clientHandshakeDiagnostics struct {
+	Engine       string
+	ClientHello  string
+	MinVersion   uint16
+	MaxVersion   uint16
+	DisableSNI   bool
+	Capabilities []string
+}
+
+type clientHandshakeDiagnosticsProvider interface {
+	clientHandshakeDiagnostics() clientHandshakeDiagnostics
+}
+
+func wrapClientHandshakeError(err error, conn net.Conn, config Config) error {
+	return E.Cause(err, formatClientHandshakeContext(conn, config))
+}
+
+func formatClientHandshakeContext(conn net.Conn, config Config) string {
+	peer := "unknown"
+	if conn != nil && conn.RemoteAddr() != nil {
+		peer = conn.RemoteAddr().String()
+	}
+	diagnostics := clientHandshakeDiagnostics{Engine: clientConfigType(config)}
+	if provider, loaded := config.(clientHandshakeDiagnosticsProvider); loaded {
+		diagnostics = provider.clientHandshakeDiagnostics()
+		if diagnostics.Engine == "" {
+			diagnostics.Engine = clientConfigType(config)
+		}
+	}
+	serverName := ""
+	var nextProtos []string
+	if config != nil {
+		serverName = config.ServerName()
+		nextProtos = config.NextProtos()
+	}
+	sni := clientSNIStatus(serverName, diagnostics.DisableSNI)
+	fields := []string{
+		"server_name=" + quoteTLSDiagnosticValue(serverName),
+		"sni=" + sni,
+		"engine=" + quoteTLSDiagnosticValue(diagnostics.Engine),
+		"client_hello=" + quoteTLSDiagnosticValue(diagnostics.ClientHello),
+		"min_version=" + quoteTLSDiagnosticValue(formatTLSVersion(diagnostics.MinVersion)),
+		"max_version=" + quoteTLSDiagnosticValue(formatTLSVersion(diagnostics.MaxVersion)),
+		"alpn=" + quoteTLSDiagnosticValue(strings.Join(nextProtos, ",")),
+	}
+	if len(diagnostics.Capabilities) > 0 {
+		fields = append(fields, "features="+quoteTLSDiagnosticValue(strings.Join(diagnostics.Capabilities, ",")))
+	}
+	return "TLS handshake with " + quoteTLSDiagnosticValue(peer) + " (" + strings.Join(fields, ", ") + ")"
+}
+
+func clientSNIStatus(serverName string, disabled bool) string {
+	if disabled {
+		return "disabled"
+	}
+	if serverName == "" {
+		return "omitted"
+	}
+	ipName := strings.TrimSuffix(serverName, ".")
+	ipName = strings.TrimPrefix(strings.TrimSuffix(ipName, "]"), "[")
+	if zoneIndex := strings.LastIndexByte(ipName, '%'); zoneIndex >= 0 {
+		ipName = ipName[:zoneIndex]
+	}
+	if net.ParseIP(ipName) != nil {
+		return "omitted"
+	}
+	return "enabled"
+}
+
+func clientConfigType(config Config) string {
+	if config == nil {
+		return "unknown"
+	}
+	configType := reflect.TypeOf(config)
+	for configType.Kind() == reflect.Pointer {
+		configType = configType.Elem()
+	}
+	return configType.Name()
+}
+
+func formatTLSVersion(version uint16) string {
+	switch version {
+	case 0:
+		return "default"
+	case VersionTLS10:
+		return "1.0"
+	case VersionTLS11:
+		return "1.1"
+	case VersionTLS12:
+		return "1.2"
+	case VersionTLS13:
+		return "1.3"
+	default:
+		return "0x" + strconv.FormatUint(uint64(version), 16)
+	}
+}
+
+func quoteTLSDiagnosticValue(value string) string {
+	// TLS names and ALPN values can originate from configuration. Keep failures
+	// single-line and bounded so one malformed value cannot flood the log.
+	const maxRunes = 256
+	valueRunes := []rune(value)
+	if len(valueRunes) > maxRunes {
+		value = string(valueRunes[:maxRunes]) + "..."
+	}
+	return strconv.Quote(value)
 }
 
 func (d *defaultDialer) Upstream() any {

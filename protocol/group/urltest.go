@@ -646,7 +646,10 @@ func (g *URLTestGroup) newSelectedConn(ctx context.Context, network string, outb
 		return nil, false
 	}
 	interrupt.RegisterConnectionFromContext(ctx, isExternal, g.connectionGeneration)
-	return g.interruptGroup.NewConnWithGeneration(conn, isExternal, g.connectionGeneration), true
+	trackedConn := g.interruptGroup.NewPendingConn(conn)
+	trackedConn.SetSelectedOutbound(outbound.Type(), outbound.Tag())
+	trackedConn.RegisterGeneration(isExternal, g.connectionGeneration)
+	return trackedConn, true
 }
 
 func (g *URLTestGroup) newSelectedPacketConn(ctx context.Context, network string, outbound adapter.Outbound, generation uint64, conn net.PacketConn, isExternal bool) (net.PacketConn, bool) {

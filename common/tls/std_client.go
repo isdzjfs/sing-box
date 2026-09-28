@@ -37,6 +37,16 @@ type STDClientConfig struct {
 	spoofMethod           tlsspoof.Method
 }
 
+func (c *STDClientConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	return clientHandshakeDiagnostics{
+		Engine:      "go",
+		ClientHello: "standard",
+		MinVersion:  c.config.MinVersion,
+		MaxVersion:  c.config.MaxVersion,
+		DisableSNI:  c.disableSNI,
+	}
+}
+
 func (c *STDClientConfig) ServerName() string {
 	return c.serverName
 }

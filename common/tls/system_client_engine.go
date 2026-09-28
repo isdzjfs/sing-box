@@ -16,6 +16,7 @@ import (
 )
 
 type systemTLSConfig struct {
+	engineName                 string
 	serverName                 string
 	nextProtos                 []string
 	handshakeTimeout           time.Duration
@@ -27,6 +28,15 @@ type systemTLSConfig struct {
 	certificatePublicKeySHA256 [][]byte
 	timeFunc                   func() time.Time
 	store                      adapter.CertificateStore
+}
+
+func (c *systemTLSConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	return clientHandshakeDiagnostics{
+		Engine:      c.engineName,
+		ClientHello: "system",
+		MinVersion:  c.minVersion,
+		MaxVersion:  c.maxVersion,
+	}
 }
 
 func (c *systemTLSConfig) ServerName() string {
@@ -63,6 +73,7 @@ func (c *systemTLSConfig) Client(conn net.Conn) (Conn, error) {
 
 func (c *systemTLSConfig) clone() systemTLSConfig {
 	return systemTLSConfig{
+		engineName:                 c.engineName,
 		serverName:                 c.serverName,
 		nextProtos:                 append([]string(nil), c.nextProtos...),
 		handshakeTimeout:           c.handshakeTimeout,
@@ -96,6 +107,7 @@ func newSystemTLSConfig(ctx context.Context, serverAddress string, options optio
 		handshakeTimeout = options.HandshakeTimeout.Build()
 	}
 	return systemTLSConfig{
+		engineName:                 engineName,
 		serverName:                 serverName,
 		nextProtos:                 append([]string(nil), options.ALPN...),
 		handshakeTimeout:           handshakeTimeout,

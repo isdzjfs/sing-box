@@ -246,7 +246,10 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 	if err != nil {
 		return nil, err
 	}
-	return s.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+	trackedConn := s.interruptGroup.NewPendingConn(conn)
+	trackedConn.SetSelectedOutbound(selected.Type(), selected.Tag())
+	trackedConn.RegisterGeneration(interrupt.IsExternalConnectionFromContext(ctx), 0)
+	return trackedConn, nil
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

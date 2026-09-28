@@ -16,6 +16,15 @@ type KTLSClientConfig struct {
 	kernelTx, kernelRx bool
 }
 
+func (w *KTLSClientConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	diagnostics := clientHandshakeDiagnostics{Engine: clientConfigType(w.Config)}
+	if provider, loaded := w.Config.(clientHandshakeDiagnosticsProvider); loaded {
+		diagnostics = provider.clientHandshakeDiagnostics()
+	}
+	diagnostics.Capabilities = append(diagnostics.Capabilities, "ktls")
+	return diagnostics
+}
+
 func (w *KTLSClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, w.Config)
 	if err != nil {

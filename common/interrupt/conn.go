@@ -10,9 +10,11 @@ import (
 
 type Conn struct {
 	net.Conn
-	group   *Group
-	element *list.Element[*groupConnItem]
-	closed  bool
+	group                *Group
+	element              *list.Element[*groupConnItem]
+	closed               bool
+	selectedOutboundType string
+	selectedOutboundTag  string
 }
 
 func (c *Conn) Close() error {
@@ -38,6 +40,18 @@ func (c *Conn) RegisterGeneration(isExternal bool, generation uint64) {
 	}
 	c.element.Value.isExternal = isExternal
 	c.element.Value.generation = generation
+}
+
+func (c *Conn) SetSelectedOutbound(outboundType string, outboundTag string) {
+	c.selectedOutboundType = outboundType
+	c.selectedOutboundTag = outboundTag
+}
+
+func (c *Conn) SelectedOutbound() (outboundType string, outboundTag string, loaded bool) {
+	if c.selectedOutboundType == "" && c.selectedOutboundTag == "" {
+		return "", "", false
+	}
+	return c.selectedOutboundType, c.selectedOutboundTag, true
 }
 
 func (c *Conn) ReaderReplaceable() bool {

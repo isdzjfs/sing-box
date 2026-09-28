@@ -34,11 +34,22 @@ type UTLSClientConfig struct {
 	verifyServerName      bool
 	handshakeTimeout      time.Duration
 	id                    utls.ClientHelloID
+	fingerprint           string
 	fragment              bool
 	fragmentFallbackDelay time.Duration
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+}
+
+func (c *UTLSClientConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	return clientHandshakeDiagnostics{
+		Engine:      "utls",
+		ClientHello: "utls/" + c.fingerprint,
+		MinVersion:  c.config.MinVersion,
+		MaxVersion:  c.config.MaxVersion,
+		DisableSNI:  c.disableSNI,
+	}
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -106,6 +117,7 @@ func (c *UTLSClientConfig) Clone() Config {
 		verifyServerName:      c.verifyServerName,
 		handshakeTimeout:      c.handshakeTimeout,
 		id:                    c.id,
+		fingerprint:           c.fingerprint,
 		fragment:              c.fragment,
 		fragmentFallbackDelay: c.fragmentFallbackDelay,
 		recordFragment:        c.recordFragment,
@@ -307,6 +319,10 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
+	fingerprint := options.UTLS.Fingerprint
+	if fingerprint == "" {
+		fingerprint = "chrome"
+	}
 	var config Config = &UTLSClientConfig{
 		ctx:                   ctx,
 		config:                &tlsConfig,
@@ -315,6 +331,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		verifyServerName:      options.DisableSNI && !options.Insecure,
 		handshakeTimeout:      handshakeTimeout,
 		id:                    id,
+		fingerprint:           fingerprint,
 		fragment:              options.Fragment,
 		fragmentFallbackDelay: time.Duration(options.FragmentFallbackDelay),
 		recordFragment:        options.RecordFragment,

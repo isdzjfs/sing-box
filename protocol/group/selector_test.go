@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -9,9 +10,33 @@ import (
 	"github.com/sagernet/sing-box/common/interrupt"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/bufio"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSelectorDialReportsSelectedOutbound(t *testing.T) {
+	underlyingConn := &testURLTestConn{}
+	selectedOutbound := &testURLTestOutbound{tag: "selected"}
+	selectedOutbound.dialFn = func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return underlyingConn, nil
+	}
+	selector := newTestSelector(selectedOutbound, &testURLTestOutbound{tag: "unused"}, nil, true)
+
+	conn, err := selector.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("example.com:443"))
+	require.NoError(t, err)
+	selectedConn, loaded := conn.(interface {
+		SelectedOutbound() (outboundType string, outboundTag string, loaded bool)
+	})
+	require.True(t, loaded)
+	outboundType, outboundTag, loaded := selectedConn.SelectedOutbound()
+	require.True(t, loaded)
+	require.Equal(t, "test", outboundType)
+	require.Equal(t, "selected", outboundTag)
+	require.NoError(t, conn.Close())
+	require.True(t, underlyingConn.Closed())
+}
 
 func TestSelectorInterruptsTrackedConnectionWhenSelectionChanges(t *testing.T) {
 	localConn := &testURLTestConn{}

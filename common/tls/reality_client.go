@@ -103,6 +103,13 @@ func (e *RealityClientConfig) ServerName() string {
 	return e.uClient.ServerName()
 }
 
+func (e *RealityClientConfig) clientHandshakeDiagnostics() clientHandshakeDiagnostics {
+	diagnostics := e.uClient.clientHandshakeDiagnostics()
+	diagnostics.Engine = "reality"
+	diagnostics.Capabilities = append(diagnostics.Capabilities, "reality")
+	return diagnostics
+}
+
 func (e *RealityClientConfig) SetServerName(serverName string) {
 	e.uClient.SetServerName(serverName)
 }
