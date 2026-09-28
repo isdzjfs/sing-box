@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strconv"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -12,6 +13,7 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/canceler"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/task"
@@ -23,21 +25,21 @@ func HandleStreamDNSRequest(ctx context.Context, router adapter.DNSRouter, conn 
 	var queryLength uint16
 	err := binary.Read(conn, binary.BigEndian, &queryLength)
 	if err != nil {
-		return err
+		return E.Cause(err, "read TCP DNS request length (source=", formatDNSRequestSource(metadata), ")")
 	}
 	if queryLength == 0 {
-		return dns.RcodeFormatError
+		return E.Cause(dns.RcodeFormatError, "validate TCP DNS request length (source=", formatDNSRequestSource(metadata), ", declared_length=0)")
 	}
 	buffer := buf.NewSize(int(queryLength))
 	defer buffer.Release()
 	_, err = buffer.ReadFullFrom(conn, int(queryLength))
 	if err != nil {
-		return err
+		return E.Cause(err, "read TCP DNS request payload (source=", formatDNSRequestSource(metadata), ", declared_length=", queryLength, ")")
 	}
 	var message mDNS.Msg
 	err = message.Unpack(buffer.Bytes())
 	if err != nil {
-		return err
+		return E.Cause(err, "unpack TCP DNS request (source=", formatDNSRequestSource(metadata), ", length=", queryLength, ")")
 	}
 	metadataInQuery := metadata
 	router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
@@ -100,27 +102,32 @@ func NewDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 				for _, counter := range counters {
 					counter(int64(packet.Buffer.Len()))
 				}
+				packetLength := packet.Buffer.Len()
+				destination = packet.Destination
 				err = message.Unpack(packet.Buffer.Bytes())
 				packet.Buffer.Release()
 				if err != nil {
+					err = E.Cause(err, "unpack UDP DNS request (destination=", quoteDNSValue(destination.String()), ", length=", packetLength, ")")
 					cancel(err)
 					return err
 				}
-				destination = packet.Destination
 			} else {
 				buffer := buf.NewPacket()
 				destination, err = conn.ReadPacket(buffer)
 				if err != nil {
 					buffer.Release()
+					err = E.Cause(err, "read UDP DNS request (source=", formatDNSRequestSource(metadata), ")")
 					cancel(err)
 					return err
 				}
 				for _, counter := range counters {
 					counter(int64(buffer.Len()))
 				}
+				packetLength := buffer.Len()
 				err = message.Unpack(buffer.Bytes())
 				buffer.Release()
 				if err != nil {
+					err = E.Cause(err, "unpack UDP DNS request (destination=", quoteDNSValue(destination.String()), ", length=", packetLength, ")")
 					cancel(err)
 					return err
 				}
@@ -129,17 +136,20 @@ func NewDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 			metadataInQuery := metadata
 			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
 				if err != nil {
+					err = E.Cause(err, "exchange DNS request (query=", formatDNSQuestion(&message), ")")
 					cancel(err)
 					return
 				}
 				timeout.Update()
 				responseBuffer, truncateErr := dns.TruncateDNSMessage(&message, response, frontHeadroom, rearHeadroom)
 				if truncateErr != nil {
+					truncateErr = E.Cause(truncateErr, "pack DNS response (query=", formatDNSQuestion(&message), ")")
 					cancel(truncateErr)
 					return
 				}
 				writeErr := conn.WritePacket(responseBuffer, destination)
 				if writeErr != nil {
+					writeErr = E.Cause(writeErr, "write DNS response (query=", formatDNSQuestion(&message), ", destination=", quoteDNSValue(destination.String()), ")")
 					cancel(writeErr)
 				}
 			})
@@ -171,26 +181,31 @@ func newDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 				for _, counter := range readCounters {
 					counter(int64(packet.Buffer.Len()))
 				}
+				packetLength := packet.Buffer.Len()
 				err = message.Unpack(packet.Buffer.Bytes())
 				packet.Buffer.Release()
 				destination = packet.Destination
 				N.PutPacketBuffer(packet)
 				if err != nil {
+					err = E.Cause(err, "unpack UDP DNS request (destination=", quoteDNSValue(destination.String()), ", length=", packetLength, ")")
 					cancel(err)
 					return err
 				}
 			} else {
 				buffer, destination, err = readWaiter.WaitReadPacket()
 				if err != nil {
+					err = E.Cause(err, "read UDP DNS request (source=", formatDNSRequestSource(metadata), ")")
 					cancel(err)
 					return err
 				}
 				for _, counter := range readCounters {
 					counter(int64(buffer.Len()))
 				}
+				packetLength := buffer.Len()
 				err = message.Unpack(buffer.Bytes())
 				buffer.Release()
 				if err != nil {
+					err = E.Cause(err, "unpack UDP DNS request (destination=", quoteDNSValue(destination.String()), ", length=", packetLength, ")")
 					cancel(err)
 					return err
 				}
@@ -199,17 +214,20 @@ func newDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 			metadataInQuery := metadata
 			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
 				if err != nil {
+					err = E.Cause(err, "exchange DNS request (query=", formatDNSQuestion(&message), ")")
 					cancel(err)
 					return
 				}
 				timeout.Update()
 				responseBuffer, truncateErr := dns.TruncateDNSMessage(&message, response, frontHeadroom, rearHeadroom)
 				if truncateErr != nil {
+					truncateErr = E.Cause(truncateErr, "pack DNS response (query=", formatDNSQuestion(&message), ")")
 					cancel(truncateErr)
 					return
 				}
 				writeErr := conn.WritePacket(responseBuffer, destination)
 				if writeErr != nil {
+					writeErr = E.Cause(writeErr, "write DNS response (query=", formatDNSQuestion(&message), ", destination=", quoteDNSValue(destination.String()), ")")
 					cancel(writeErr)
 				}
 			})
@@ -219,4 +237,27 @@ func newDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn 
 		conn.Close()
 	})
 	return group.Run(fastClose)
+}
+
+func formatDNSRequestSource(metadata adapter.InboundContext) string {
+	if !metadata.Source.IsValid() {
+		return quoteDNSValue("unknown")
+	}
+	return quoteDNSValue(metadata.Source.String())
+}
+
+func formatDNSQuestion(message *mDNS.Msg) string {
+	if message == nil || len(message.Question) == 0 {
+		return quoteDNSValue("<empty>")
+	}
+	return quoteDNSValue(dns.FormatQuestion(message.Question[0].String()))
+}
+
+func quoteDNSValue(value string) string {
+	const maxRunes = 256
+	valueRunes := []rune(value)
+	if len(valueRunes) > maxRunes {
+		value = string(valueRunes[:maxRunes]) + "..."
+	}
+	return strconv.Quote(value)
 }

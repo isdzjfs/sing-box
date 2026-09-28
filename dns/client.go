@@ -755,7 +755,7 @@ func (c *Client) exchangeToTransport(ctx context.Context, transport adapter.DNST
 	if errors.As(err, &rcodeError) {
 		return FixedResponseStatus(message, int(rcodeError)), nil
 	}
-	return nil, err
+	return nil, wrapDNSTransportError(err, transport, message)
 }
 
 func (c *Client) exchangeToTransportAsync(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, callback func(response *dns.Msg, err error)) {
@@ -770,8 +770,32 @@ func (c *Client) exchangeToTransportAsync(ctx context.Context, transport adapter
 			callback(FixedResponseStatus(message, int(rcodeError)), nil)
 			return
 		}
-		callback(nil, err)
+		callback(nil, wrapDNSTransportError(err, transport, message))
 	})
+}
+
+func wrapDNSTransportError(err error, transport adapter.DNSTransport, message *dns.Msg) error {
+	question := "<empty>"
+	if message != nil && len(message.Question) > 0 {
+		question = FormatQuestion(message.Question[0].String())
+	}
+	transportName := "unknown"
+	if transport != nil {
+		transportName = transport.Type()
+		if transport.Tag() != "" {
+			transportName += "[" + transport.Tag() + "]"
+		}
+	}
+	return E.Cause(err, "exchange DNS query (query=", quoteDNSDiagnosticValue(question), ", transport=", quoteDNSDiagnosticValue(transportName), ")")
+}
+
+func quoteDNSDiagnosticValue(value string) string {
+	const maxRunes = 256
+	valueRunes := []rune(value)
+	if len(valueRunes) > maxRunes {
+		value = string(valueRunes[:maxRunes]) + "..."
+	}
+	return strconv.Quote(value)
 }
 
 func MessageToAddresses(response *dns.Msg) []netip.Addr {

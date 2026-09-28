@@ -128,20 +128,23 @@ func ReadMessage(reader io.Reader) (*mDNS.Msg, error) {
 	var responseLen uint16
 	err := binary.Read(reader, binary.BigEndian, &responseLen)
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "read DNS message length")
 	}
 	if responseLen < 10 {
-		return nil, mDNS.ErrShortRead
+		return nil, E.Cause(mDNS.ErrShortRead, "validate DNS message length (declared_length=", responseLen, ")")
 	}
 	buffer := buf.NewSize(int(responseLen))
 	defer buffer.Release()
 	_, err = buffer.ReadFullFrom(reader, int(responseLen))
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "read DNS message payload (declared_length=", responseLen, ")")
 	}
 	var message mDNS.Msg
 	err = message.Unpack(buffer.Bytes())
-	return &message, err
+	if err != nil {
+		return nil, E.Cause(err, "unpack DNS message payload (length=", responseLen, ")")
+	}
+	return &message, nil
 }
 
 func WriteMessage(writer io.Writer, messageId uint16, message *mDNS.Msg) error {

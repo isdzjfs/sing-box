@@ -221,12 +221,12 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	rawMessage, err := exMessage.PackBuffer(requestBuffer.FreeBytes())
 	if err != nil {
 		requestBuffer.Release()
-		return nil, err
+		return nil, E.Cause(err, "pack HTTPS DNS request")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, t.destination.String(), bytes.NewReader(rawMessage))
 	if err != nil {
 		requestBuffer.Release()
-		return nil, err
+		return nil, E.Cause(err, "create HTTPS DNS request")
 	}
 	request.Header = t.headers.Clone()
 	request.Header.Set("Content-Type", MimeType)
@@ -237,7 +237,7 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	response, err := currentTransport.RoundTrip(request)
 	requestBuffer.Release()
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "round trip HTTPS DNS request")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -249,18 +249,18 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		defer responseBuffer.Release()
 		_, err = responseBuffer.ReadFullFrom(response.Body, int(response.ContentLength))
 		if err != nil {
-			return nil, err
+			return nil, E.Cause(err, "read HTTPS DNS response body (content_length=", response.ContentLength, ")")
 		}
 		err = responseMessage.Unpack(responseBuffer.Bytes())
 	} else {
 		rawMessage, err = io.ReadAll(response.Body)
 		if err != nil {
-			return nil, err
+			return nil, E.Cause(err, "read HTTPS DNS response body")
 		}
 		err = responseMessage.Unpack(rawMessage)
 	}
 	if err != nil {
-		return nil, err
+		return nil, E.Cause(err, "unpack HTTPS DNS response")
 	}
 	return &responseMessage, nil
 }

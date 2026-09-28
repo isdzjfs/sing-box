@@ -5,6 +5,7 @@ package resolved
 import (
 	"context"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,16 +155,17 @@ func (i *Service) exchangePacket(buffer *buf.Buffer, oob []byte, source M.Socksa
 	ctx := log.ContextWithNewID(i.ctx)
 	err := i.exchangePacket0(ctx, buffer, oob, source)
 	if err != nil {
-		i.logger.ErrorContext(ctx, "process DNS packet: ", err)
+		i.logger.ErrorContext(ctx, E.Cause(err, "process DNS packet (source=", strconv.Quote(source.String()), ")"))
 	}
 }
 
 func (i *Service) exchangePacket0(ctx context.Context, buffer *buf.Buffer, oob []byte, source M.Socksaddr) error {
+	packetLength := buffer.Len()
 	var message mDNS.Msg
 	err := message.Unpack(buffer.Bytes())
 	buffer.Release()
 	if err != nil {
-		return E.Cause(err, "unpack request")
+		return E.Cause(err, "unpack UDP DNS request (length=", packetLength, ")")
 	}
 	var metadata adapter.InboundContext
 	metadata.Source = source
@@ -171,15 +173,25 @@ func (i *Service) exchangePacket0(ctx context.Context, buffer *buf.Buffer, oob [
 	metadata.Inbound = i.Tag()
 	response, err := i.dnsRouter.Exchange(adapter.WithContext(ctx, &metadata), &message, adapter.DNSQueryOptions{})
 	if err != nil {
-		return err
+		return E.Cause(err, "exchange DNS request (query=", resolvedDNSQuestion(&message), ")")
 	}
 	responseBuffer, err := dns.TruncateDNSMessage(&message, response, 0, 0)
 	if err != nil {
-		return err
+		return E.Cause(err, "pack DNS response (query=", resolvedDNSQuestion(&message), ")")
 	}
 	defer responseBuffer.Release()
 	_, _, err = i.listener.UDPConn().WriteMsgUDPAddrPort(responseBuffer.Bytes(), oob, source.AddrPort())
-	return err
+	if err != nil {
+		return E.Cause(err, "write DNS response (query=", resolvedDNSQuestion(&message), ")")
+	}
+	return nil
+}
+
+func resolvedDNSQuestion(message *mDNS.Msg) string {
+	if message == nil || len(message.Question) == 0 {
+		return strconv.Quote("<empty>")
+	}
+	return strconv.Quote(dns.FormatQuestion(message.Question[0].String()))
 }
 
 func (i *Service) onNetworkUpdate() {
