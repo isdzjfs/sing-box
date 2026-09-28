@@ -482,7 +482,7 @@ func convertSSH(provider option.ProxyProvider, proxy map[string]any, domainResol
 		PrivateKeyPath:       stringValue(proxy, "private-key-path", "private_key_path"),
 		PrivateKeyPassphrase: stringValue(proxy, "private-key-passphrase", "private_key_passphrase"),
 		HostKey:              listableStringsFromAny(firstValue(proxy, "host-key", "host_key")),
-		HostKeyAlgorithms:    listableStringsFromAny(firstValue(proxy, "host-key-algorithms", "host_key_algorithms")),
+		HostKeyAlgorithms:    option.LegacyListable[string](listableStringsFromAny(firstValue(proxy, "host-key-algorithms", "host_key_algorithms"))),
 		ClientVersion:        stringValue(proxy, "client-version", "client_version"),
 		Cipher:               listableStringsFromAny(firstValue(proxy, "cipher")),
 		MAC:                  listableStringsFromAny(firstValue(proxy, "mac")),
@@ -522,7 +522,7 @@ func networkBytesFromAny(value any) (*byteformats.NetworkBytesCompat, error) {
 	return &result, nil
 }
 
-func hysteria2ServerPorts(proxy map[string]any) badoption.Listable[string] {
+func hysteria2ServerPorts(proxy map[string]any) option.LegacyListable[string] {
 	values := stringsFromAny(firstValue(proxy, "ports", "mport", "server-ports", "server_ports"))
 	if len(values) == 0 {
 		return nil
@@ -530,7 +530,7 @@ func hysteria2ServerPorts(proxy map[string]any) badoption.Listable[string] {
 	for index, value := range values {
 		values[index] = strings.ReplaceAll(value, "-", ":")
 	}
-	return badoption.Listable[string](values)
+	return option.LegacyListable[string](values)
 }
 
 func wireGuardAddresses(proxy map[string]any) badoption.Listable[netip.Prefix] {
@@ -599,7 +599,7 @@ func wireGuardPeers(proxy map[string]any, localAddresses []netip.Prefix) ([]opti
 	return peers, nil
 }
 
-func wireGuardAllowedIPs(value any, localAddresses []netip.Prefix) badoption.Listable[netip.Prefix] {
+func wireGuardAllowedIPs(value any, localAddresses []netip.Prefix) option.LegacyListable[netip.Prefix] {
 	allowedIPs := wireGuardPrefixValues(value)
 	if len(allowedIPs) == 0 && len(localAddresses) > 0 {
 		for _, address := range localAddresses {
@@ -614,7 +614,7 @@ func wireGuardAllowedIPs(value any, localAddresses []netip.Prefix) badoption.Lis
 	if len(allowedIPs) == 0 {
 		return nil
 	}
-	return badoption.Listable[netip.Prefix](allowedIPs)
+	return option.LegacyListable[netip.Prefix](allowedIPs)
 }
 
 func wireGuardPrefixValues(value any) []netip.Prefix {

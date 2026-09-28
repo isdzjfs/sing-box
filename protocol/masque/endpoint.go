@@ -37,29 +37,25 @@ func newDeviceOptions(ctx context.Context, logger log.ContextLogger, handler tun
 		udpTimeout = C.UDPTimeout
 	}
 	return &device.Options{
-		Context:         ctx,
-		Logger:          logger,
-		System:          options.System,
-		Handler:         handler,
-		UDPTimeout:      udpTimeout,
-		ICMPTimeout:     C.ICMPTimeout,
-		UDPMapping:      tun.NATMapping(options.UDPMapping),
-		UDPFiltering:    tun.NATFiltering(options.UDPFiltering),
-		UDPNATMax:       options.UDPNATMax,
-		InterfaceFinder: service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
-		Name:            options.Name,
-		NamePrefix:      "masque",
-		MTU:             options.MTU,
-		PacketHeadroom:  masque.PacketHeadroom,
+		Context:             ctx,
+		Logger:              logger,
+		System:              options.System,
+		Handler:             handler,
+		UDPTimeout:          udpTimeout,
+		ICMPTimeout:         C.ICMPTimeout,
+		UDPMapping:          tun.NATMapping(options.UDPMapping),
+		UDPFiltering:        tun.NATFiltering(options.UDPFiltering),
+		UDPNATMax:           options.UDPNATMax,
+		InterfaceFinder:     service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
+		Name:                options.Name,
+		NamePrefix:          "masque",
+		MTU:                 options.MTU,
+		PacketFrontHeadroom: masque.PacketHeadroom,
 		Configuration: device.Configuration{
 			MTU:     options.MTU,
 			Address: address,
 		},
 	}
-}
-
-func (e *endpointBase) SupportsFlow(network string) bool {
-	return slices.Contains(e.Network(), network)
 }
 
 func (e *endpointBase) newConnection(ctx context.Context, endpoint adapter.Endpoint, localAddresses []netip.Prefix, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
