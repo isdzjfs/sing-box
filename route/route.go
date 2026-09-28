@@ -3,7 +3,6 @@ package route
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/netip"
 	"slices"
@@ -164,8 +163,9 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	onClose = registerInterrupt(chain, conn, onClose)
-	outbound := chain[len(chain)-1]
+	// Keep the resolved chain for metadata, but dispatch through the group so
+	// URLTest can reject and retry a dial whose selection changes in flight.
+	outbound := selectedOutbound
 	if outboundHandler, isHandler := outbound.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -197,26 +197,6 @@ func resolveOutbound(outbound adapter.Outbound, network string) ([]adapter.Outbo
 	}
 	return chain, nil
 }
-
-func registerInterrupt(chain []adapter.Outbound, closer io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
-	var removers []func()
-	for _, outbound := range chain {
-		group, isGroup := outbound.(adapter.OutboundGroup)
-		if !isGroup {
-			continue
-		}
-		removers = append(removers, group.AttachConnection(closer))
-	}
-	if len(removers) == 0 {
-		return onClose
-	}
-	return N.AppendClose(onClose, func(it error) {
-		for _, remove := range removers {
-			remove()
-		}
-	})
-}
-
 func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
 	done := make(chan any)
 	err := r.routePacketConnection(ctx, conn, metadata, N.OnceClose(func(it error) {
@@ -338,8 +318,8 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 		conn = newFakeIPNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
 	}
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	onClose = registerInterrupt(chain, conn, onClose)
-	outbound := chain[len(chain)-1]
+	// See the TCP path above: the group owns selection-generation validation.
+	outbound := selectedOutbound
 	if outboundHandler, isHandler := outbound.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
