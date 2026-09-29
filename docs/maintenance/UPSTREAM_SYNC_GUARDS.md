@@ -6,13 +6,16 @@
 
 用户约定：除非上游具有等价或更好的实现，否则以本地修复为准。“更好”需要覆盖下列行为，并给出正确性、并发安全、兼容性或有证据的性能收益；提交更新、代码更短或合并无冲突都不能单独证明更好。
 
-本清单目前登记 2026-09-08 的 URLTest 修复，尚未穷举分支的全部增强功能。未列出的本地功能也不得在同步中随意丢弃。
+本清单目前登记 2026-09-08 的 URLTest 修复，以及 2026-09-29 的 TLS/连接诊断、DNS 诊断和 XHTTP 错误因果链修复，尚未穷举分支的全部增强功能。未列出的本地功能也不得在同步中随意丢弃。
 
 ## 已核对的修复基线
 
 - 内核：[047febf578f4133ca1bbebceae6ce3134cdc864a](https://github.com/isdzjfs/sing-box/commit/047febf578f4133ca1bbebceae6ce3134cdc864a)，父提交为本次上游同步 `c7f858aaf7bf1b07cc678e8d1e5598706ffa3565`。
 - SenVPN：[36389f22ab129a75903c66a2ef2695183379d1bd](https://github.com/isdzjfs/SenVPN/commit/36389f22ab129a75903c66a2ef2695183379d1bd)，其 `core/libbox/version.properties` 在此基线固定到上述内核提交。
 - 原修复任务报告：内核回归测试及竞态检测通过，SenVPN 246 项单元测试通过，生成了 x86_64 AAR 和调试 APK；未做真机验证。这是历史验证记录，不代替后续同步后的验证。
+- TLS/连接诊断：[991215b112eb37112bb41010816bf56e657935b5](https://github.com/isdzjfs/sing-box/commit/991215b112eb37112bb41010816bf56e657935b5)。
+- DNS 诊断：[5178cbe1b00d18116351ff3ef738cc2fb7850f7e](https://github.com/isdzjfs/sing-box/commit/5178cbe1b00d18116351ff3ef738cc2fb7850f7e)。
+- XHTTP 关闭原因传播：[f0e9b402a852aaf5de69245060e5c13464ac0a00](https://github.com/isdzjfs/sing-box/commit/f0e9b402a852aaf5de69245060e5c13464ac0a00)。
 - 哈希仅用于追溯修复，不要求以后固定在这些版本。更新内核仓库不等于更新 SenVPN 使用的 AAR 或部署到设备。
 
 ## URLTest 行为清单
@@ -39,6 +42,22 @@
 - 2026-09-23 的上游同步把 `adapter.OutboundGroup` 改为 `Selected(network)` 和 `AttachConnection`，路由在进入连接管理器前解析完整出站链。后续审查发现，把普通 TCP/UDP 连接直接交给该叶子会绕过 `URLTest.DialContext` / `ListenPacket` 的拨号代际校验，且 `Selected` 与 `AttachConnection` 分离时可能把旧叶子登记到新代际。普通连接现仅把解析链用于元数据，实际拨号仍交给顶层组；流转发继续使用解析出的 `FlowOutbound`。`TrackerMetadata` 从 `InboundContext.OutboundChain` 读取路由时快照。继续修改这些入口时，要同时检查冷启动 fallback、刷新竞态、拨号中切换及已路由连接的中断行为。
 - SenVPN 对应源代码在 `app/src/main/java/com/senvpn/android/`，测试在 `app/src/test/java/com/senvpn/android/`。核对界面结果时必须追踪内核字段到这些消费端，不能只看 Go 代码。
 
+## 网络诊断与错误因果链行为清单
+
+这些条目保护的是诊断能力和错误传播语义，不要求日志文本、函数名或实现结构永远不变。上游实现只有在保留原始错误因果链、提供等价或更完整的安全上下文，并通过对应回归场景时，才可替代本地实现。
+
+| 编号 | 必须保持的行为与典型反例 | 主要实现入口 | 回归证据 |
+| --- | --- | --- | --- |
+| OBS-01 | TLS 握手失败必须保留底层错误，并提供远端、服务端名称、SNI 状态、TLS 引擎、ClientHello、版本范围、ALPN 与启用能力等可操作上下文。连接握手及上传/下载关闭错误必须能区分路由组与实际选中节点，并保留目标、协议、路由链和远端地址。来自配置、嗅探或标签的值必须单行、带引号且限长，不得记录证书私钥、认证头、完整请求体等敏感内容。为采集实际选择而附加到 Selector/URLTest 连接的元数据不得改变连接代际、取消、中断或重试行为。典型反例：错误退化为裸 `tls: protocol version not supported`，或只记录组标签而无法识别实际节点。 | `common/tls/client.go` 及各 TLS 客户端包装；`route/conn.go`；`common/interrupt/conn.go`；`protocol/group/selector.go`、`urltest.go` | `common/tls/client_diagnostics_test.go`：`TestClientHandshakeErrorIncludesSafeContext`、`TestClientHandshakeContextShowsUnsetVersionLimits`、`TestClientHandshakeContextShowsOmittedSNIForIPAddress`；`route/conn_diagnostics_test.go`：`TestFormatConnectionDiagnostics`、`TestFormatConnectionDiagnosticsUsesCapturedRemoteAddress`、`TestConnectionDiagnosticFieldIsSingleLineAndBounded`；`protocol/group/selector_test.go`：`TestSelectorDialReportsSelectedOutbound`；同时保留 Selector/URLTest 的连接代际与中断测试。 |
+| OBS-02 | DNS 错误必须保留底层错误，并在可用时给出查询、DNS transport 类型/标签、网络、入站、来源、目标和原始目标。TCP、HTTPS 与 HTTP/3 路径必须区分长度读取、载荷读取、打包、请求创建、往返、响应体读取、解包和响应写回等阶段；畸形或截断报文需包含已声明/实际长度。日志字段必须单行、带引号且限长，不得输出 HTTP 认证头或响应体等敏感内容。典型反例：`process DNS packet: unexpected EOF` 或 `exchange failed`，无法判断失败查询、上游和处理阶段。 | `dns/client.go`；`dns/transport/https.go`、`tcp.go`、`quic/http3.go`；`protocol/dns/handle.go`；`route/dns.go`；`service/resolved/service.go` | `dns/client_diagnostics_test.go`：`TestExchangeToTransportErrorIncludesQueryAndTransport`；`dns/transport/message_diagnostics_test.go`：`TestReadMessageReportsTruncatedPayloadStage`、`TestReadMessageReportsUnpackStage`；`protocol/dns/handle_diagnostics_test.go`：`TestHandleStreamDNSRequestReportsTruncatedRequestContext`；`route/dns_diagnostics_test.go`：`TestFormatDNSPacketContext`。 |
+| XHTTP-01 | 本地主动关闭 XHTTP 连接时，阻塞中的下载读取必须收到可识别为关闭/取消的错误，不能泄漏底层 HTTP/2 `response body closed` 并误报为远端故障。stream-up 与 packet-up 的后到上传失败必须携带上传阶段和原始原因，传播到下载读取侧并释放连接；本地关闭不得反向当作上传失败。典型反例：真实上传错误被后续的 `http2: response body closed` 覆盖，或正常停用连接产生错误级日志。 | `transport/v2rayxhttp/client.go` 的上传监视与 packet-up 回调；`transport/v2rayxhttp/conn.go` 的 `waitReadCloser` / `CloseWithError` | `transport/v2rayxhttp/conn_test.go`：`TestWaitReadCloserMapsLocalClose`、`TestMonitorStreamUploadPropagatesFailure`、`TestMonitorStreamUploadIgnoresLocalClose`。 |
+
+### 配套边界
+
+- `OBS-01` 跨越 TLS、路由和出站组连接包装。只保留日志格式而丢失实际选中节点追踪不算等价；只保留节点追踪而破坏 UT-01、UT-05 等代际/中断约束也不算等价。
+- `OBS-02` 的上下文由 DNS 入站、路由和 transport 分层补充。避免在多层重复拼接同一字段，但不能因此退化为只有最外层的通用错误。
+- `XHTTP-01` 是并发关闭与错误传播修复，不是单纯修改日志文案。审查 `OpenStream` 返回值、请求体生命周期、pipe/wait reader、HTTP/2/HTTP/3 客户端或 XMux 清理顺序时，都要运行对应回归测试并核对原始错误是否仍可通过 `errors.Is` 识别。
+
 ## 每次上游同步的检查流程
 
 1. 检查工作区、当前分支和 remotes；记录本地 HEAD 与 fetch 前的 `upstream/testing`。保护无关的未提交改动。
@@ -55,11 +74,14 @@ protocol/group/                 common/urltest/
 adapter/outbound_group.go      adapter/outbound.go
 adapter/experimental.go        adapter/outbound/
 common/dialer/                 common/trafficcontrol/
+common/tls/                    common/interrupt/
 daemon/started_service*        daemon/url_test*
 experimental/libbox/           experimental/clashapi/
 proxyprovider/                 option/group.go
 route/reference*               route/route.go
-common/interrupt/
+route/conn.go                  route/dns.go
+dns/                           protocol/dns/
+service/resolved/              transport/v2rayxhttp/
 go.mod                         go.sum
 ```
 
@@ -80,6 +102,18 @@ go test ./protocol/group ./common/urltest ./daemon ./common/dialer ./common/traf
 
 ```powershell
 go test -race ./protocol/group ./common/urltest ./daemon -count=1
+```
+
+同步触及网络诊断或错误因果链入口时，按实际影响运行：
+
+```powershell
+go test ./common/tls ./route ./dns ./dns/transport/... ./protocol/dns ./service/resolved ./transport/v2rayxhttp ./protocol/group -count=1
+```
+
+修改 XHTTP 上传监视、关闭顺序、wait reader 或出站选择连接包装等并发路径时，另在可用的 race 环境执行：
+
+```powershell
+go test -race ./transport/v2rayxhttp ./protocol/group -count=1
 ```
 
 接口或依赖有变化时按实际影响扩展到主模块全量测试、`test/` 独立模块编译、Linux/Android 编译。修改 proto 时使用项目生成器重生成，不能手改 protobuf 描述符。
