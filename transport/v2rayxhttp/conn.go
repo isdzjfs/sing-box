@@ -117,23 +117,39 @@ func (w *waitReadCloser) Read(b []byte) (int, error) {
 	<-w.wait
 	w.access.Lock()
 	reader := w.reader
-	err := w.err
+	closeErr := w.err
 	w.access.Unlock()
 	if reader == nil {
-		if err == nil {
-			err = io.ErrClosedPipe
+		if closeErr == nil {
+			closeErr = io.ErrClosedPipe
 		}
-		return 0, err
+		return 0, closeErr
 	}
-	return reader.Read(b)
+	n, err := reader.Read(b)
+	if err != nil {
+		w.access.Lock()
+		closeErr = w.err
+		w.access.Unlock()
+		if closeErr != nil {
+			return n, closeErr
+		}
+	}
+	return n, err
 }
 
 func (w *waitReadCloser) Close() error {
+	return w.CloseWithError(net.ErrClosed)
+}
+
+func (w *waitReadCloser) CloseWithError(err error) error {
+	if err == nil {
+		err = net.ErrClosed
+	}
 	w.access.Lock()
 	w.closed = true
 	reader := w.reader
-	if reader == nil && w.err == nil {
-		w.err = io.ErrClosedPipe
+	if w.err == nil {
+		w.err = err
 	}
 	w.access.Unlock()
 	w.signal()

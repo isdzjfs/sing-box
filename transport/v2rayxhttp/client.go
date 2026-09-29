@@ -412,7 +412,8 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		if primaryXMux != nil {
 			primaryXMux.decrementRequests()
 		}
-		_, _, _, err = primaryClient.OpenStream(requestCtx, c.primary.requestURL.String(), sessionID, reader, true)
+		var uploadReader io.ReadCloser
+		uploadReader, _, _, err = primaryClient.OpenStream(requestCtx, c.primary.requestURL.String(), sessionID, reader, true)
 		if err != nil {
 			release()
 			readCloser.Close()
@@ -420,13 +421,31 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 			writer.Close()
 			return nil, err
 		}
+		go monitorStreamUpload(uploadReader, readCloser, release)
 		return conn, nil
 	}
 	go c.postPacketLoop(requestCtx, reader, sessionID, c.primary, primaryClient, primaryXMux, func(err error) {
-		_ = readCloser.Close()
+		_ = closeReadCloserWithError(readCloser, E.Cause(err, "upload XHTTP packet stream"))
 		release()
 	})
 	return conn, nil
+}
+
+func monitorStreamUpload(uploadReader io.ReadCloser, downloadReader io.ReadCloser, onError func()) {
+	defer uploadReader.Close()
+	_, err := io.Copy(io.Discard, uploadReader)
+	if err == nil || E.IsClosedOrCanceled(err) {
+		return
+	}
+	_ = closeReadCloserWithError(downloadReader, E.Cause(err, "upload XHTTP stream"))
+	onError()
+}
+
+func closeReadCloserWithError(reader io.ReadCloser, err error) error {
+	if errorCloser, loaded := reader.(interface{ CloseWithError(error) error }); loaded {
+		return errorCloser.CloseWithError(err)
+	}
+	return reader.Close()
 }
 
 func (c *Client) postPacketLoop(ctx context.Context, reader *io.PipeReader, sessionID string, endpoint *clientEndpoint, dynamicClient dialerClient, dynamicXMux *xmuxClient, onError func(error)) {
