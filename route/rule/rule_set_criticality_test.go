@@ -52,9 +52,9 @@ type criticalityTestOutboundManager struct {
 	final     adapter.Outbound
 }
 
-func (m *criticalityTestOutboundManager) Start(adapter.StartStage) error { return nil }
-func (m *criticalityTestOutboundManager) Close() error                   { return nil }
-func (m *criticalityTestOutboundManager) Outbounds() []adapter.Outbound  { return nil }
+func (m *criticalityTestOutboundManager) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (m *criticalityTestOutboundManager) Close() error                                   { return nil }
+func (m *criticalityTestOutboundManager) Outbounds() []adapter.Outbound                  { return nil }
 
 func (m *criticalityTestOutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
 	outbound, loaded := m.outbounds[tag]

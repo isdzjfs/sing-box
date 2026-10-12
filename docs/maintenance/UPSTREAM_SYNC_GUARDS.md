@@ -6,7 +6,7 @@
 
 用户约定：除非上游具有等价或更好的实现，否则以本地修复为准。“更好”需要覆盖下列行为，并给出正确性、并发安全、兼容性或有证据的性能收益；提交更新、代码更短或合并无冲突都不能单独证明更好。
 
-本清单目前登记 2026-09-08 的 URLTest 修复，以及 2026-09-29 的 TLS/连接诊断、DNS 诊断和 XHTTP 错误因果链修复，尚未穷举分支的全部增强功能。未列出的本地功能也不得在同步中随意丢弃。
+本清单目前登记 2026-09-08 的 URLTest 修复、2026-09-29 的 TLS/连接诊断、DNS 诊断和 XHTTP 错误因果链修复，以及 2026-10-12 同步时适配的运行时订阅生命周期，尚未穷举分支的全部增强功能。未列出的本地功能也不得在同步中随意丢弃。
 
 ## 已核对的修复基线
 
@@ -51,12 +51,22 @@
 | OBS-01 | TLS 握手失败必须保留底层错误，并提供远端、服务端名称、SNI 状态、TLS 引擎、ClientHello、版本范围、ALPN 与启用能力等可操作上下文。连接握手及上传/下载关闭错误必须能区分路由组与实际选中节点，并保留目标、协议、路由链和远端地址。来自配置、嗅探或标签的值必须单行、带引号且限长，不得记录证书私钥、认证头、完整请求体等敏感内容。为采集实际选择而附加到 Selector/URLTest 连接的元数据不得改变连接代际、取消、中断或重试行为。典型反例：错误退化为裸 `tls: protocol version not supported`，或只记录组标签而无法识别实际节点。 | `common/tls/client.go` 及各 TLS 客户端包装；`route/conn.go`；`common/interrupt/conn.go`；`protocol/group/selector.go`、`urltest.go` | `common/tls/client_diagnostics_test.go`：`TestClientHandshakeErrorIncludesSafeContext`、`TestClientHandshakeContextShowsUnsetVersionLimits`、`TestClientHandshakeContextShowsOmittedSNIForIPAddress`；`route/conn_diagnostics_test.go`：`TestFormatConnectionDiagnostics`、`TestFormatConnectionDiagnosticsUsesCapturedRemoteAddress`、`TestConnectionDiagnosticFieldIsSingleLineAndBounded`；`protocol/group/selector_test.go`：`TestSelectorDialReportsSelectedOutbound`；同时保留 Selector/URLTest 的连接代际与中断测试。 |
 | OBS-02 | DNS 错误必须保留底层错误，并在可用时给出查询、DNS transport 类型/标签、网络、入站、来源、目标和原始目标。TCP、HTTPS 与 HTTP/3 路径必须区分长度读取、载荷读取、打包、请求创建、往返、响应体读取、解包和响应写回等阶段；畸形或截断报文需包含已声明/实际长度。日志字段必须单行、带引号且限长，不得输出 HTTP 认证头或响应体等敏感内容。典型反例：`process DNS packet: unexpected EOF` 或 `exchange failed`，无法判断失败查询、上游和处理阶段。 | `dns/client.go`；`dns/transport/https.go`、`tcp.go`、`quic/http3.go`；`protocol/dns/handle.go`；`route/dns.go`；`service/resolved/service.go` | `dns/client_diagnostics_test.go`：`TestExchangeToTransportErrorIncludesQueryAndTransport`；`dns/transport/message_diagnostics_test.go`：`TestReadMessageReportsTruncatedPayloadStage`、`TestReadMessageReportsUnpackStage`；`protocol/dns/handle_diagnostics_test.go`：`TestHandleStreamDNSRequestReportsTruncatedRequestContext`；`route/dns_diagnostics_test.go`：`TestFormatDNSPacketContext`。 |
 | XHTTP-01 | 本地主动关闭 XHTTP 连接时，阻塞中的下载读取必须收到可识别为关闭/取消的错误，不能泄漏底层 HTTP/2 `response body closed` 并误报为远端故障。stream-up 与 packet-up 的后到上传失败必须携带上传阶段和原始原因，传播到下载读取侧并释放连接；本地关闭不得反向当作上传失败。典型反例：真实上传错误被后续的 `http2: response body closed` 覆盖，或正常停用连接产生错误级日志。 | `transport/v2rayxhttp/client.go` 的上传监视与 packet-up 回调；`transport/v2rayxhttp/conn.go` 的 `waitReadCloser` / `CloseWithError` | `transport/v2rayxhttp/conn_test.go`：`TestWaitReadCloserMapsLocalClose`、`TestMonitorStreamUploadPropagatesFailure`、`TestMonitorStreamUploadIgnoresLocalClose`。 |
+| XHTTP-02 | 服务端关闭连接、允许 HTTP handler 返回前，必须等当前响应写入与 flush 完成；关闭后的写入不得再访问 `ResponseWriter`。典型反例：下载请求取消时，`net/http` 的 `finishRequest` / `finalFlush` 与转发协程的 `Write` / `Flush` 并发访问同一 writer。 | `transport/v2rayxhttp/server.go` 的 `serverHTTPConn.Write` / `Close` 与下载 handler | `transport/v2rayxhttp/server_conn_test.go`：`TestServerHTTPConnCloseWaitsForResponseFlush`；保留 `TestXHTTPPacketUp` 并执行竞态检测。 |
 
 ### 配套边界
 
 - `OBS-01` 跨越 TLS、路由和出站组连接包装。只保留日志格式而丢失实际选中节点追踪不算等价；只保留节点追踪而破坏 UT-01、UT-05 等代际/中断约束也不算等价。
 - `OBS-02` 的上下文由 DNS 入站、路由和 transport 分层补充。避免在多层重复拼接同一字段，但不能因此退化为只有最外层的通用错误。
 - `XHTTP-01` 是并发关闭与错误传播修复，不是单纯修改日志文案。审查 `OpenStream` 返回值、请求体生命周期、pipe/wait reader、HTTP/2/HTTP/3 客户端或 XMux 清理顺序时，都要运行对应回归测试并核对原始错误是否仍可通过 `errors.Is` 识别。
+
+## 订阅刷新与生命周期行为清单
+
+| 编号 | 必须保持的行为与典型反例 | 主要实现入口 | 回归证据 |
+| --- | --- | --- | --- |
+| PP-01 | 运行时订阅仍可新增、替换和移除出站，并更新组成员与依赖。稳定包装器替换目标时，旧目标的 scope 必须及时释放；替换启动失败时释放候选，保留当前目标。关闭与发布须串行，关闭后不得接受新出站。普通出站与端点须按注册身份区分，不能仅以接口断言判断：新的 `Lifecycle` 使普通出站也结构性满足 `Endpoint`。 | `adapter/outbound/manager.go` 的 `Start`、`Add`、`Create`、`Remove`；`proxyprovider/manager.go` 的 `publish`、`startProviderOutbound`；`proxyprovider/outbound.go`；`box.go` 的启动与关闭顺序 | `adapter/outbound/manager_test.go` 的 `TestManagerRuntimeOutboundScopes`、`TestManagerFailedRuntimeStartupReleasesScope`、`TestManagerRejectedRemovalKeepsDependentOutbound`、`TestManagerRuntimeCreateReplacesScopedOutbound`、`TestManagerRuntimeAddRemoveDuringShutdown`；`proxyprovider/outbound_lifecycle_test.go`；根目录 `proxy_provider_start_test.go` 的启动、刷新和旧快照保留测试。 |
+
+- 2026-10-12 同步接受上游 `a691a4402` 的 `Start(stage, scope)` 与逆序资源清理，并保留本地运行时管理能力。上游 `a364ff479` 删除的是其未实现的热重载接口；本地 `proxyprovider` 已使用这些能力，不能同步删除。出站管理器以独立 scope 管理可移除的节点，订阅包装器以独立 scope 管理可替换的目标，避免长期保留已废弃对象的清理回调。
+- 涉及这些路径时运行上述回归与订阅刷新测试，并对 `adapter/outbound`、`proxyprovider`、`protocol/group` 执行竞态检测。UT-01 至 UT-09 的组成员、选择与结果契约仍同时适用。
 
 ## 每次上游同步的检查流程
 

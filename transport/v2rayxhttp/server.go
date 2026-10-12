@@ -435,6 +435,10 @@ func (c *serverHTTPConn) Write(b []byte) (int, error) {
 }
 
 func (c *serverHTTPConn) Close() error {
+	// The HTTP handler returns when done closes. Finish any write and flush
+	// before net/http regains ownership of its ResponseWriter.
+	c.Lock()
+	defer c.Unlock()
 	c.doneOnce.Do(func() {
 		close(c.done)
 	})

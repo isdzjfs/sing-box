@@ -63,7 +63,7 @@ func (m *Manager) Name() string {
 	return "http-client"
 }
 
-func (m *Manager) Start(stage adapter.StartStage) error {
+func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -74,6 +74,7 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 		}
 		m.defaultTransport = sharedTransport
 	}
+	scope.Add(m.close)
 	return nil
 }
 
@@ -220,12 +221,9 @@ func (m *Manager) ResetNetwork() {
 	}
 }
 
-func (m *Manager) Close() error {
+func (m *Manager) close() error {
 	m.access.Lock()
 	defer m.access.Unlock()
-	if m.managedTransports == nil {
-		return nil
-	}
 	var err error
 	for _, transport := range m.managedTransports {
 		err = E.Append(err, transport.close(), func(err error) error {

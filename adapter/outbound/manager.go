@@ -2,18 +2,15 @@ package outbound
 
 import (
 	"context"
-	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/taskmonitor"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-	"github.com/sagernet/sing/common/logger"
 )
 
 var _ adapter.OutboundManager = (*Manager)(nil)
@@ -24,8 +21,12 @@ type Manager struct {
 	endpoint                adapter.EndpointManager
 	defaultTag              string
 	access                  sync.RWMutex
+	lifecycleAccess         sync.Mutex
 	started                 bool
+	closed                  bool
 	stage                   adapter.StartStage
+	scope                   *adapter.Scope
+	scopes                  map[adapter.Outbound]*adapter.Scope
 	outbounds               []adapter.Outbound
 	outboundByTag           map[string]adapter.Outbound
 	dependByTag             map[string][]string
@@ -33,7 +34,7 @@ type Manager struct {
 	defaultOutboundFallback func() (adapter.Outbound, error)
 }
 
-func NewManager(logger logger.ContextLogger, registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
+func NewManager(logger log.ContextLogger, registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
 	return &Manager{
 		logger:        logger,
 		registry:      registry,
@@ -41,6 +42,7 @@ func NewManager(logger logger.ContextLogger, registry adapter.OutboundRegistry, 
 		defaultTag:    defaultTag,
 		outboundByTag: make(map[string]adapter.Outbound),
 		dependByTag:   make(map[string][]string),
+		scopes:        make(map[adapter.Outbound]*adapter.Scope),
 	}
 }
 
@@ -48,14 +50,18 @@ func (m *Manager) Initialize(defaultOutboundFallback func() (adapter.Outbound, e
 	m.defaultOutboundFallback = defaultOutboundFallback
 }
 
-func (m *Manager) Start(stage adapter.StartStage) error {
-	m.access.Lock()
-	if m.started && m.stage >= stage {
-		panic("already started")
+func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	m.lifecycleAccess.Lock()
+	defer m.lifecycleAccess.Unlock()
+	if m.closed {
+		return os.ErrClosed
 	}
+	m.access.Lock()
 	m.started = true
 	m.stage = stage
+	m.scope = scope
 	if stage == adapter.StartStateInitialize {
+		scope.Add(m.Close)
 		if m.defaultTag != "" && m.defaultOutbound == nil {
 			defaultEndpoint, loaded := m.endpoint.Get(m.defaultTag)
 			if !loaded {
@@ -75,25 +81,69 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 			m.defaultOutbound = directOutbound
 		}
 	}
-	outbounds := m.outbounds
+	outbounds := slices.Clone(m.outbounds)
 	m.access.Unlock()
 	if stage == adapter.StartStateStart {
 		return m.startOutbounds(append(outbounds, common.Map(m.endpoint.Endpoints(), func(it adapter.Endpoint) adapter.Outbound { return it })...))
 	}
 	for _, outbound := range outbounds {
-		name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-		done := adapter.LogElapsed(m.logger, stage, " ", name)
-		err := adapter.LegacyStart(outbound, stage)
-		done()
-		if err != nil {
-			return E.Cause(err, stage, " ", name)
+		if err := m.startOutbound(outbound, stage); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+// Each runtime outbound owns a scope that can be released when a provider
+// removes it, without retaining every obsolete component until box shutdown.
+// lifecycleAccess serializes startup, replacement, removal, and shutdown.
+func (m *Manager) startOutbound(outbound adapter.Outbound, stage adapter.StartStage) error {
+	outboundScope := m.scopes[outbound]
+	if outboundScope == nil {
+		if err := m.scope.Context().Err(); err != nil {
+			return err
+		}
+		outboundScope = adapter.NewScope(m.scope.Context(), m.logger)
+		m.scopes[outbound] = outboundScope
+		if _, scoped := outbound.(adapter.Lifecycle); !scoped {
+			if closer, loaded := outbound.(interface{ Close() error }); loaded {
+				outboundScope.Add(closer.Close)
+			}
+		}
+	}
+	lifecycle, loaded := outbound.(adapter.Lifecycle)
+	if !loaded {
+		return nil
+	}
+	name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
+	if err := outboundScope.Start(name, lifecycle, stage); err != nil {
+		_ = outboundScope.Close()
+		delete(m.scopes, outbound)
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) Close() error {
+	m.lifecycleAccess.Lock()
+	defer m.lifecycleAccess.Unlock()
+	m.closed = true
+	m.access.Lock()
+	m.started = false
+	outbounds := m.outbounds
+	m.outbounds = nil
+	m.access.Unlock()
+	var err error
+	for _, outbound := range slices.Backward(outbounds) {
+		if scope := m.scopes[outbound]; scope != nil {
+			err = E.Append(err, scope.Close(), nil)
+			delete(m.scopes, outbound)
+		}
+	}
+	return err
+}
+
 func (m *Manager) startOutbounds(outbounds []adapter.Outbound) error {
-	monitor := taskmonitor.New(m.logger, C.StartTimeout)
 	started := make(map[string]bool)
 	for {
 		canContinue := false
@@ -111,27 +161,22 @@ func (m *Manager) startOutbounds(outbounds []adapter.Outbound) error {
 			}
 			started[outboundTag] = true
 			canContinue = true
-			name := "outbound/" + outboundToStart.Type() + "[" + outboundTag + "]"
-			if starter, isStarter := outboundToStart.(adapter.Lifecycle); isStarter {
-				done := adapter.LogElapsed(m.logger, "start ", name)
-				monitor.Start("start ", name)
-				err := starter.Start(adapter.StartStateStart)
-				monitor.Finish()
-				done()
+			// Scoped outbounds also satisfy Endpoint structurally. Only registered
+			// endpoints belong to the endpoint manager's lifecycle scope.
+			if endpoint, isEndpoint := m.endpoint.Get(outboundTag); isEndpoint && endpoint == outboundToStart {
+				err := m.endpoint.StartEndpoint(endpoint)
 				if err != nil {
-					return E.Cause(err, "start ", name)
+					return err
 				}
-			} else if starter, isStarter := outboundToStart.(interface {
-				Start() error
-			}); isStarter {
-				done := adapter.LogElapsed(m.logger, "start ", name)
-				monitor.Start("start ", name)
-				err := starter.Start()
-				monitor.Finish()
-				done()
-				if err != nil {
-					return E.Cause(err, "start ", name)
-				}
+				continue
+			}
+			_, isLifecycle := outboundToStart.(adapter.Lifecycle)
+			if !isLifecycle {
+				continue
+			}
+			err := m.startOutbound(outboundToStart, adapter.StartStateStart)
+			if err != nil {
+				return err
 			}
 		}
 		if len(started) == len(outbounds) {
@@ -164,33 +209,6 @@ func (m *Manager) startOutbounds(outbounds []adapter.Outbound) error {
 	return nil
 }
 
-func (m *Manager) Close() error {
-	monitor := taskmonitor.New(m.logger, C.StopTimeout)
-	m.access.Lock()
-	if !m.started {
-		m.access.Unlock()
-		return nil
-	}
-	m.started = false
-	outbounds := m.outbounds
-	m.outbounds = nil
-	m.access.Unlock()
-	var err error
-	for _, outbound := range outbounds {
-		if closer, isCloser := outbound.(io.Closer); isCloser {
-			name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-			done := adapter.LogElapsed(m.logger, "close ", name)
-			monitor.Start("close ", name)
-			err = E.Append(err, closer.Close(), func(err error) error {
-				return E.Cause(err, "close ", name)
-			})
-			monitor.Finish()
-			done()
-		}
-	}
-	return nil
-}
-
 func (m *Manager) Outbounds() []adapter.Outbound {
 	m.access.RLock()
 	defer m.access.RUnlock()
@@ -214,84 +232,85 @@ func (m *Manager) Default() adapter.Outbound {
 }
 
 func (m *Manager) Remove(tag string) error {
+	m.lifecycleAccess.Lock()
+	defer m.lifecycleAccess.Unlock()
+	if m.closed {
+		return os.ErrClosed
+	}
 	m.access.Lock()
-	defer m.access.Unlock()
 	outbound, found := m.outboundByTag[tag]
 	if !found {
+		m.access.Unlock()
 		return os.ErrInvalid
 	}
-	dependBy := m.dependByTag[tag]
-	if len(dependBy) > 0 {
+	if dependBy := m.dependByTag[tag]; len(dependBy) > 0 {
+		m.access.Unlock()
 		return E.New("outbound[", tag, "] is depended by ", strings.Join(dependBy, ", "))
 	}
 	delete(m.outboundByTag, tag)
-	index := common.Index(m.outbounds, func(it adapter.Outbound) bool {
-		return it == outbound
-	})
+	index := common.Index(m.outbounds, func(it adapter.Outbound) bool { return it == outbound })
 	if index == -1 {
-		panic("invalid inbound index")
+		m.access.Unlock()
+		panic("invalid outbound index")
 	}
-	m.outbounds = append(m.outbounds[:index], m.outbounds[index+1:]...)
-	started := m.started
+	m.outbounds = slices.Delete(m.outbounds, index, index+1)
 	if m.defaultOutbound == outbound {
+		m.defaultOutbound = nil
 		if len(m.outbounds) > 0 {
 			m.defaultOutbound = m.outbounds[0]
-			m.logger.Info("updated default outbound to ", m.defaultOutbound.Tag())
-		} else {
-			m.defaultOutbound = nil
 		}
 	}
-	dependencies := outbound.Dependencies()
-	for _, dependency := range dependencies {
-		if len(m.dependByTag[dependency]) == 1 {
+	for _, dependency := range outbound.Dependencies() {
+		dependBy := common.Filter(m.dependByTag[dependency], func(it string) bool { return it != tag })
+		if len(dependBy) == 0 {
 			delete(m.dependByTag, dependency)
 		} else {
-			m.dependByTag[dependency] = common.Filter(m.dependByTag[dependency], func(it string) bool {
-				return it != tag
-			})
+			m.dependByTag[dependency] = dependBy
 		}
 	}
-	if started {
-		return common.Close(outbound)
+	m.access.Unlock()
+	if scope := m.scopes[outbound]; scope != nil {
+		delete(m.scopes, outbound)
+		return scope.Close()
 	}
-	return nil
+	return common.Close(outbound)
 }
 
-// Add registers an already constructed outbound. It is used by runtime
-// providers to publish a stable wrapper while keeping the concrete proxy
-// implementation private to the provider lifecycle.
+// Add publishes the stable wrapper used by runtime proxy providers.
 func (m *Manager) Add(outbound adapter.Outbound) error {
+	m.lifecycleAccess.Lock()
+	defer m.lifecycleAccess.Unlock()
+	if m.closed {
+		return os.ErrClosed
+	}
+	if m.scope != nil {
+		if err := m.scope.Context().Err(); err != nil {
+			return err
+		}
+	}
 	tag := outbound.Tag()
 	if tag == "" {
 		return os.ErrInvalid
 	}
 	m.access.RLock()
 	_, exists := m.outboundByTag[tag]
-	started := m.started
-	stage := m.stage
+	started, stage := m.started, m.stage
 	m.access.RUnlock()
 	if exists {
 		return E.New("outbound already exists: ", tag)
 	}
 	if started {
-		name := "outbound/" + outbound.Type() + "[" + tag + "]"
 		for _, startStage := range adapter.ListStartStages {
 			if startStage > stage {
 				break
 			}
-			done := adapter.LogElapsed(m.logger, startStage, " ", name)
-			err := adapter.LegacyStart(outbound, startStage)
-			done()
-			if err != nil {
-				return E.Cause(err, startStage, " ", name)
+			if err := m.startOutbound(outbound, startStage); err != nil {
+				return err
 			}
 		}
 	}
 	m.access.Lock()
 	defer m.access.Unlock()
-	if _, loaded := m.outboundByTag[tag]; loaded {
-		return E.New("outbound already exists: ", tag)
-	}
 	m.outbounds = append(m.outbounds, outbound)
 	m.outboundByTag[tag] = outbound
 	for _, dependency := range outbound.Dependencies() {
@@ -323,53 +342,67 @@ func (m *Manager) UpdateDependencies(tag string, previous []string, current []st
 	}
 }
 
-func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
+func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) error {
 	if tag == "" {
 		return os.ErrInvalid
 	}
-	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, inboundType, options)
+	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, outboundType, options)
 	if err != nil {
 		return err
 	}
-	if m.started {
-		name := "outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-		for _, stage := range adapter.ListStartStages {
-			done := adapter.LogElapsed(m.logger, stage, " ", name)
-			err = adapter.LegacyStart(outbound, stage)
-			done()
-			if err != nil {
-				return E.Cause(err, stage, " ", name)
+	m.lifecycleAccess.Lock()
+	defer m.lifecycleAccess.Unlock()
+	if m.closed {
+		_ = common.Close(outbound)
+		return os.ErrClosed
+	}
+	if m.scope != nil {
+		if err = m.scope.Context().Err(); err != nil {
+			_ = common.Close(outbound)
+			return err
+		}
+	}
+	m.access.RLock()
+	started, stage := m.started, m.stage
+	m.access.RUnlock()
+	if started {
+		for _, startStage := range adapter.ListStartStages {
+			if startStage > stage {
+				break
+			}
+			if err = m.startOutbound(outbound, startStage); err != nil {
+				return err
 			}
 		}
 	}
 	m.access.Lock()
-	defer m.access.Unlock()
-	if existsOutbound, loaded := m.outboundByTag[tag]; loaded {
-		if m.started {
-			err = common.Close(existsOutbound)
-			if err != nil {
-				return E.Cause(err, "close outbound/", existsOutbound.Type(), "[", existsOutbound.Tag(), "]")
-			}
+	previous := m.outboundByTag[tag]
+	if previous != nil {
+		index := common.Index(m.outbounds, func(it adapter.Outbound) bool { return it == previous })
+		if index == -1 {
+			m.access.Unlock()
+			panic("invalid outbound index")
 		}
-		existsIndex := common.Index(m.outbounds, func(it adapter.Outbound) bool {
-			return it == existsOutbound
-		})
-		if existsIndex == -1 {
-			panic("invalid inbound index")
+		m.outbounds = slices.Delete(m.outbounds, index, index+1)
+		for _, dependency := range previous.Dependencies() {
+			m.dependByTag[dependency] = common.Filter(m.dependByTag[dependency], func(it string) bool { return it != tag })
 		}
-		m.outbounds = append(m.outbounds[:existsIndex], m.outbounds[existsIndex+1:]...)
 	}
 	m.outbounds = append(m.outbounds, outbound)
 	m.outboundByTag[tag] = outbound
-	dependencies := outbound.Dependencies()
-	for _, dependency := range dependencies {
+	for _, dependency := range outbound.Dependencies() {
 		m.dependByTag[dependency] = append(m.dependByTag[dependency], tag)
 	}
-	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) {
+	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) || m.defaultOutbound == previous {
 		m.defaultOutbound = outbound
-		if m.started {
-			m.logger.Info("updated default outbound to ", outbound.Tag())
-		}
+	}
+	m.access.Unlock()
+	if previousScope := m.scopes[previous]; previousScope != nil {
+		delete(m.scopes, previous)
+		return previousScope.Close()
+	}
+	if started && previous != nil {
+		return common.Close(previous)
 	}
 	return nil
 }

@@ -84,7 +84,7 @@ type resolveTestDNSRouter struct {
 	lookupCount int
 }
 
-func (r *resolveTestDNSRouter) Start(stage adapter.StartStage) error {
+func (r *resolveTestDNSRouter) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 

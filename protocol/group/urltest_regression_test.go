@@ -213,10 +213,11 @@ func TestURLTestNestedTCPOnlyGroupMustNotWinUDPSelection(t *testing.T) {
 		}
 		g := item.(*URLTest)
 		manager.outbounds[tag] = g
-		if err := g.Start(); err != nil {
+		scope := adapter.NewScope(ctx, log.NewNOPFactory().Logger())
+		if err := g.Start(adapter.StartStateStart, scope); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { g.Close() })
+		t.Cleanup(func() { scope.Close() })
 		return g
 	}
 	inner := create("inner", []string{"tcp-only"})

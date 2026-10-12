@@ -19,6 +19,7 @@ var (
 type dynamicOutboundState struct {
 	outbound adapter.Outbound
 	server   M.Socksaddr
+	scope    *adapter.Scope
 }
 
 // dynamicOutbound keeps the identity used by groups and routing stable while a
@@ -28,9 +29,9 @@ type dynamicOutbound struct {
 	state atomic.Pointer[dynamicOutboundState]
 }
 
-func newDynamicOutbound(tag string, outbound adapter.Outbound, server M.Socksaddr) *dynamicOutbound {
+func newDynamicOutbound(tag string, target providerTarget) *dynamicOutbound {
 	dynamic := &dynamicOutbound{tag: tag}
-	dynamic.state.Store(&dynamicOutboundState{outbound: outbound, server: server})
+	dynamic.state.Store(&dynamicOutboundState{outbound: target.outbound, server: target.server, scope: target.scope})
 	return dynamic
 }
 
@@ -42,12 +43,8 @@ func (d *dynamicOutbound) current() adapter.Outbound {
 	return state.outbound
 }
 
-func (d *dynamicOutbound) replace(outbound adapter.Outbound, server M.Socksaddr) adapter.Outbound {
-	previous := d.state.Swap(&dynamicOutboundState{outbound: outbound, server: server})
-	if previous == nil {
-		return nil
-	}
-	return previous.outbound
+func (d *dynamicOutbound) replace(target providerTarget) *dynamicOutboundState {
+	return d.state.Swap(&dynamicOutboundState{outbound: target.outbound, server: target.server, scope: target.scope})
 }
 
 func (d *dynamicOutbound) ServerAddress() M.Socksaddr {
@@ -83,20 +80,27 @@ func (d *dynamicOutbound) Dependencies() []string {
 	return nil
 }
 
-func (d *dynamicOutbound) Start(stage adapter.StartStage) error {
-	outbound := d.current()
-	if outbound == nil {
+func (d *dynamicOutbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	state := d.state.Load()
+	if state == nil || state.outbound == nil {
 		return E.New("proxy-provider outbound is unavailable: ", d.tag)
 	}
-	return adapter.LegacyStart(outbound, stage)
+	if stage == adapter.StartStateInitialize {
+		// The wrapper stays stable; shutdown always closes its current target.
+		scope.Add(d.Close)
+	}
+	if lifecycle, loaded := state.outbound.(adapter.Lifecycle); loaded {
+		return lifecycle.Start(stage, state.scope)
+	}
+	return nil
 }
 
 func (d *dynamicOutbound) Close() error {
-	outbound := d.current()
-	if outbound == nil {
+	state := d.state.Load()
+	if state == nil {
 		return nil
 	}
-	return closeProviderOutbound(outbound)
+	return state.scope.Close()
 }
 
 func (d *dynamicOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -113,14 +117,4 @@ func (d *dynamicOutbound) ListenPacket(ctx context.Context, destination M.Socksa
 		return nil, E.New("proxy-provider outbound is unavailable: ", d.tag)
 	}
 	return outbound.ListenPacket(ctx, destination)
-}
-
-func closeProviderOutbound(outbound adapter.Outbound) error {
-	if lifecycle, loaded := outbound.(adapter.Lifecycle); loaded {
-		return lifecycle.Close()
-	}
-	if closer, loaded := outbound.(interface{ Close() error }); loaded {
-		return closer.Close()
-	}
-	return nil
 }

@@ -81,6 +81,7 @@ type providerFetchResult struct {
 type providerTarget struct {
 	outbound adapter.Outbound
 	server   M.Socksaddr
+	scope    *adapter.Scope
 }
 
 func NewManager(options ManagerOptions) (*Manager, error) {
@@ -123,7 +124,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	var added []*dynamicOutbound
 	for _, tag := range sortedTargetTags(targets) {
 		target := targets[tag]
-		wrapper := newDynamicOutbound(tag, target.outbound, target.server)
+		wrapper := newDynamicOutbound(tag, target)
 		if err = manager.addOutbound(wrapper); err != nil {
 			for _, previous := range added {
 				_ = manager.removeOutbound(previous.Tag())
@@ -131,7 +132,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 			}
 			for remainingTag, target := range targets {
 				if _, loaded := manager.wrappers[remainingTag]; !loaded {
-					_ = closeProviderOutbound(target.outbound)
+					_ = target.scope.Close()
 				}
 			}
 			cancel()
@@ -147,7 +148,10 @@ func (m *Manager) Name() string {
 	return "proxy-provider"
 }
 
-func (m *Manager) Start(stage adapter.StartStage) error {
+func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(m.Close)
+	}
 	if stage != adapter.StartStateStarted {
 		return nil
 	}
@@ -437,6 +441,7 @@ func (m *Manager) createTargets(resolved map[string]resolvedProvider) (map[strin
 			}
 			targets[outboundOptions.Tag] = providerTarget{
 				outbound: target,
+				scope:    m.newTargetScope(target),
 				server:   serverAddressFromOptions(outboundOptions.Options),
 			}
 		}
@@ -455,6 +460,7 @@ func (m *Manager) createTargets(resolved map[string]resolvedProvider) (map[strin
 			}
 			targets[endpointOptions.Tag] = providerTarget{
 				outbound: target,
+				scope:    m.newTargetScope(target),
 				server:   serverAddressFromOptions(endpointOptions.Options),
 			}
 		}
@@ -518,7 +524,7 @@ func (m *Manager) publish(targets map[string]providerTarget, groupMembers map[st
 			continue
 		}
 		target := targets[tag]
-		wrapper := newDynamicOutbound(tag, target.outbound, target.server)
+		wrapper := newDynamicOutbound(tag, target)
 		if err := m.addOutbound(wrapper); err != nil {
 			cleanup()
 			return E.Cause(err, "publish proxy-provider outbound ", tag)
@@ -531,7 +537,7 @@ func (m *Manager) publish(targets map[string]providerTarget, groupMembers map[st
 		if !existingTags[tag] {
 			continue
 		}
-		if err := startProviderOutbound(targets[tag].outbound); err != nil {
+		if err := startProviderOutbound(targets[tag]); err != nil {
 			cleanup()
 			return E.Cause(err, "start replacement proxy-provider outbound ", tag)
 		}
@@ -556,17 +562,17 @@ func (m *Manager) publish(targets map[string]providerTarget, groupMembers map[st
 		appliedGroups = append(appliedGroups, update)
 	}
 
-	replaced := make(map[string]adapter.Outbound)
+	replaced := make(map[string]*dynamicOutboundState)
 	for _, tag := range sortedTargetTags(targets) {
 		if !existingTags[tag] {
 			continue
 		}
 		wrapper := m.wrappers[tag]
 		target := targets[tag]
-		previous := wrapper.replace(target.outbound, target.server)
+		previous := wrapper.replace(target)
 		replaced[tag] = previous
 		if m.updateDependencies != nil {
-			m.updateDependencies(tag, previous.Dependencies(), target.outbound.Dependencies())
+			m.updateDependencies(tag, previous.outbound.Dependencies(), target.outbound.Dependencies())
 		}
 	}
 
@@ -581,7 +587,7 @@ func (m *Manager) publish(targets map[string]providerTarget, groupMembers map[st
 		delete(m.wrappers, tag)
 	}
 	for _, previous := range replaced {
-		_ = closeProviderOutbound(previous)
+		_ = previous.scope.Close()
 	}
 	return nil
 }
@@ -695,9 +701,23 @@ func sortedTargetTags(targets map[string]providerTarget) []string {
 	return tags
 }
 
-func startProviderOutbound(outbound adapter.Outbound) error {
+func (m *Manager) newTargetScope(outbound adapter.Outbound) *adapter.Scope {
+	scope := adapter.NewScope(m.ctx, m.logger)
+	if _, scoped := outbound.(adapter.Lifecycle); !scoped {
+		if closer, loaded := outbound.(interface{ Close() error }); loaded {
+			scope.Add(closer.Close)
+		}
+	}
+	return scope
+}
+
+func startProviderOutbound(target providerTarget) error {
+	lifecycle, loaded := target.outbound.(adapter.Lifecycle)
+	if !loaded {
+		return nil
+	}
 	for _, stage := range adapter.ListStartStages {
-		if err := adapter.LegacyStart(outbound, stage); err != nil {
+		if err := lifecycle.Start(stage, target.scope); err != nil {
 			return err
 		}
 	}
@@ -706,7 +726,7 @@ func startProviderOutbound(outbound adapter.Outbound) error {
 
 func closeProviderTargets(targets map[string]providerTarget) {
 	for _, target := range targets {
-		_ = closeProviderOutbound(target.outbound)
+		_ = target.scope.Close()
 	}
 }
 

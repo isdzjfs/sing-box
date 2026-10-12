@@ -73,7 +73,7 @@ type preMatchFlowTestOutboundManager struct {
 	outbounds       map[string]adapter.Outbound
 }
 
-func (m *preMatchFlowTestOutboundManager) Start(stage adapter.StartStage) error {
+func (m *preMatchFlowTestOutboundManager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 

@@ -62,10 +62,11 @@ func newURLTestService(t *testing.T) (*StartedService, *group.URLTest, *urltest.
 	}
 	g := auto.(*group.URLTest)
 	manager.items["auto"] = g
-	if err := g.Start(); err != nil {
+	scope := adapter.NewScope(ctx, log.NewNOPFactory().Logger())
+	if err := g.Start(adapter.StartStateStart, scope); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { g.Close() })
+	t.Cleanup(func() { scope.Close() })
 	history.StoreURLTestHistory("a", &adapter.URLTestHistory{Time: time.Now().Add(-time.Second), Delay: 100})
 	history.StoreURLTestHistory("b", &adapter.URLTestHistory{Time: time.Now().Add(-time.Second), Delay: 200})
 	g.PerformUpdateCheck()

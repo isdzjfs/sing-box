@@ -718,7 +718,7 @@ type testURLTestOutboundManager struct {
 	outbounds map[string]adapter.Outbound
 }
 
-func (m *testURLTestOutboundManager) Start(stage adapter.StartStage) error {
+func (m *testURLTestOutboundManager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 
@@ -752,7 +752,7 @@ type testURLTestConnectionManager struct {
 	packetConn N.PacketConn
 }
 
-func (m *testURLTestConnectionManager) Start(stage adapter.StartStage) error {
+func (m *testURLTestConnectionManager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	return nil
 }
 
