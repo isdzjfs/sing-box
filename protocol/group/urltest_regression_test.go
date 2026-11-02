@@ -14,10 +14,83 @@ import (
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
+	"github.com/stretchr/testify/require"
 )
+
+func TestURLTestRejectsDuplicateTagsButAllowsEmptyProviderGroup(t *testing.T) {
+	ctx := newTestURLTestContext()
+	_, err := NewURLTest(ctx, nil, log.NewNOPFactory().Logger(), "auto", option.URLTestOutboundOptions{Outbounds: []string{"node", "node"}})
+	require.ErrorContains(t, err, "duplicate tag: node")
+	_, err = NewURLTest(ctx, nil, log.NewNOPFactory().Logger(), "auto", option.URLTestOutboundOptions{})
+	require.NoError(t, err)
+}
+
+func TestURLTestRoutedDialFailureInvalidatesOnlyOwnHistoryScope(t *testing.T) {
+	for _, network := range []string{N.NetworkTCP, N.NetworkUDP} {
+		t.Run(network, func(t *testing.T) {
+			ctx := newTestURLTestContext()
+			history := service.PtrFromContext[urltest.HistoryStorage](ctx)
+			node := &testURLTestOutbound{tag: "shared"}
+			manager := &testURLTestOutboundManager{outbound: node}
+			const ownURL = "https://first.invalid/probe"
+			const otherURL = "https://second.invalid/probe"
+			g, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{node}, ownURL, time.Minute, 50, time.Minute, false)
+			require.NoError(t, err)
+			t.Cleanup(func() { g.Close() })
+			connectionManager := &testURLTestConnectionManager{}
+			outbound := &URLTest{group: g, outbound: manager, link: ownURL, logger: log.NewNOPFactory().Logger(), connection: connectionManager}
+			history.StoreURLTestHistory(node.Tag(), &adapter.URLTestHistory{Time: time.Now(), Delay: 10}, ownURL)
+			history.StoreURLTestHistory(node.Tag(), &adapter.URLTestHistory{Time: time.Now(), Delay: 20}, otherURL)
+			destination := M.ParseSocksaddr("example.invalid:443")
+			if network == N.NetworkTCP {
+				conn := &testURLTestConn{}
+				defer conn.Close()
+				outbound.NewConnection(ctx, conn, adapter.InboundContext{}, nil)
+				_, err = connectionManager.this.DialContext(connectionManager.ctx, network, destination)
+			} else {
+				conn := &testURLTestPacketConn{}
+				defer conn.Close()
+				outbound.NewPacketConnection(ctx, bufio.NewPacketConn(conn), adapter.InboundContext{}, nil)
+				_, err = connectionManager.this.ListenPacket(connectionManager.ctx, destination)
+			}
+			require.Error(t, err)
+			require.Nil(t, history.LoadURLTestHistory(node.Tag(), ownURL))
+			require.NotNil(t, history.LoadURLTestHistory(node.Tag(), otherURL))
+			require.NotNil(t, history.LoadLatestURLTestHistory(node.Tag(), ownURL), "connection failures must preserve visible probe history")
+		})
+	}
+}
+
+func TestURLTestInternalSessionDoesNotRegisterInboundGeneration(t *testing.T) {
+	ctx := newTestURLTestContext()
+	localConn := &testURLTestConn{}
+	remoteConn := &testURLTestConn{}
+	old := &testURLTestOutbound{tag: "old", dialFn: func(context.Context, string, M.Socksaddr) (net.Conn, error) { return remoteConn, nil }}
+	fresh := &testURLTestOutbound{tag: "fresh"}
+	g, err := NewURLTestGroup(ctx, nil, log.NewNOPFactory().Logger(), []adapter.Outbound{old, fresh}, "", time.Minute, 50, time.Minute, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { g.Close() })
+	setTestSelectedTCP(g, old)
+	connectionManager := &testURLTestConnectionManager{}
+	outbound := &URLTest{group: g, connection: connectionManager}
+	outbound.NewConnection(ctx, localConn, adapter.InboundContext{}, nil)
+	t.Cleanup(func() { connectionManager.conn.Close() })
+	// Shared session dials inherit the inbound context, but their interruption
+	// must not register or close the request that has not finished dialing yet.
+	sessionCtx := adapter.ContextForMultiplexSession(connectionManager.ctx)
+	conn, err := outbound.DialContext(sessionCtx, N.NetworkTCP, M.ParseSocksaddr("example.invalid:443"))
+	require.NoError(t, err)
+	defer conn.Close()
+	updated, generation := g.applySelectedUpdate(fresh, true, nil, false)
+	require.True(t, updated)
+	g.interruptGroup.InterruptBefore(generation, false)
+	require.True(t, remoteConn.Closed(), "the internal session must follow the selection change")
+	require.False(t, localConn.Closed(), "an internal session must not bind the inbound to its generation")
+}
 
 type blockedNetworkOutbound struct {
 	*testURLTestOutbound

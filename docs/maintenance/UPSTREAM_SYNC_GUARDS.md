@@ -38,9 +38,13 @@
 
 - `daemon/started_service.proto` 的 `GroupItem.urlTestTimeMillis` / `urlTestSequence` 与 `URLTestItemV2Result.sequence` 及其生成代码、libbox 字段、SenVPN 映射必须一起核对。秒和毫秒不可混用；兼容旧字段的转换要保留。
 - 成员刷新、测速去重、取消和连接代际的保护来自多次本地修复。不能只保留上表新测试而删掉 `protocol/group/urltest_test.go`、`selector_test.go` 中已有测试。
+- UT-03 / UT-05 的补充约束：普通路由连接继续经组拨号，由 `URLTest.DialContext` / `ListenPacket` 根据实际失败的节点和测试 URL 清理可选结果，保留其他 URL 的结果及可见历史。2026-11-02 同步未采用上游 `5372a195b` 在连接管理器中按路由快照叶子清理通用历史的方案，因为本地组拨号已处理真实失败，快照叶子可能在重试期间过期。证据为 `TestRouteDispatchesThroughResolvedGroup`、`TestURLTestRoutedDialFailureInvalidatesOnlyOwnHistoryScope` 及既有拨号切换/重试测试。
+- UT-05 的内部连接边界：`ContextForMultiplexSession` 和 DNS transport 会显式清除外部连接标记；内部连接应随其所属组切换关闭，但不得通过继承的 `ConnectionTracker` 把原始入站连接登记到内部会话的代际。入口为 `adapter/inbound.go`、`dns/client.go`、`common/interrupt/context.go` 和 URLTest 的 `newSelectedConn` / `newSelectedPacketConn`；回归为 `TestURLTestInternalSessionDoesNotRegisterInboundGeneration`。2026-11-02 同步的上游 `0164ce7b8` 与本地入站追踪结合后需此适配；该回归在适配前失败。
+- PP-01 / UT-09 的空组边界：接受上游 `c90ccd753` 的重复标签检查，但订阅 URLTest 允许初始成员为空并在运行时填充。回归为 `TestURLTestRejectsDuplicateTagsButAllowsEmptyProviderGroup` 及根目录订阅启动/刷新测试。
 - 上游的 `References()`、选择变化通知、空闲连接管理应与本地修复同时保留。恢复本地旧文件不能连带删掉已经接受的上游功能。
 - 2026-09-23 的上游同步把 `adapter.OutboundGroup` 改为 `Selected(network)` 和 `AttachConnection`，路由在进入连接管理器前解析完整出站链。后续审查发现，把普通 TCP/UDP 连接直接交给该叶子会绕过 `URLTest.DialContext` / `ListenPacket` 的拨号代际校验，且 `Selected` 与 `AttachConnection` 分离时可能把旧叶子登记到新代际。普通连接现仅把解析链用于元数据，实际拨号仍交给顶层组；流转发继续使用解析出的 `FlowOutbound`。`TrackerMetadata` 从 `InboundContext.OutboundChain` 读取路由时快照。继续修改这些入口时，要同时检查冷启动 fallback、刷新竞态、拨号中切换及已路由连接的中断行为。
 - SenVPN 对应源代码在 `app/src/main/java/com/senvpn/android/`，测试在 `app/src/test/java/com/senvpn/android/`。核对界面结果时必须追踪内核字段到这些消费端，不能只看 Go 代码。
+- libbox 平台接口兼容：2026-11-02 接受上游通过平台 `FindConnectionOwner` 查询连接所属应用的流程及 Android procfs 查询修复，但保留未调用的 `PlatformInterface.UseProcFS()` 声明。SenVPN 的 `VpnPlatformInterface.kt` 仍覆盖此方法；直接删除会使其在新 AAR 下无法编译。移除兼容声明前须同时迁移消费端，不能恢复已经取消的旧查询分支。
 
 ## 网络诊断与错误因果链行为清单
 

@@ -7,6 +7,7 @@ type PlatformInterface interface {
 	UsePlatformAutoDetectInterfaceControl() bool
 	AutoDetectInterfaceControl(fd int32) error
 	OpenTun(options TunOptions) (int32, error)
+	// Retained for existing mobile clients. Ownership lookup now always uses FindConnectionOwner.
 	UseProcFS() bool
 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) (*ConnectionOwner, error)
 	StartDefaultInterfaceMonitor(listener InterfaceUpdateListener) error

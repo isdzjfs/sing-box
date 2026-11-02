@@ -116,7 +116,7 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return nil, err
 	}
 	if d.parallel {
-		conn, err := N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+		conn, err := N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
 		if err == nil && conn != nil {
 			d.recordServerConnection(destination, conn)
 		}
@@ -216,7 +216,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		fallbackDelay = d.fallbackDelay
 	}
 	if d.parallel {
-		conn, err := DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		conn, err := DialParallelNetwork(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 		if err == nil && conn != nil {
 			d.recordServerConnection(destination, conn)
 		}

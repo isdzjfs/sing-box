@@ -94,6 +94,12 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
+	// Provider-backed groups may start empty and receive members at runtime.
+	for i, tag := range outbound.tags {
+		if slices.Contains(outbound.tags[:i], tag) {
+			return nil, E.New("duplicate tag: ", tag)
+		}
+	}
 	return outbound, nil
 }
 
@@ -338,7 +344,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 }
 
 func (s *URLTest) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	trackedConn := s.group.newPendingInterruptConn(conn)
 	ctx = interrupt.ContextWithConnectionTracker(ctx, trackedConn)
 	conn = trackedConn
@@ -346,7 +352,7 @@ func (s *URLTest) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 }
 
 func (s *URLTest) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	trackedConn := s.group.newPendingInterruptNetworkPacketConn(conn)
 	ctx = interrupt.ContextWithConnectionTracker(ctx, trackedConn)
 	conn = trackedConn

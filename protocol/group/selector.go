@@ -69,6 +69,11 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
+	for i, tag := range outbound.tags {
+		if slices.Contains(outbound.tags[:i], tag) {
+			return nil, E.New("duplicate tag: ", tag)
+		}
+	}
 	return outbound, nil
 }
 
@@ -268,7 +273,7 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 }
 
 func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	selected := s.selected.Load()
 	if selected == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, E.New("missing selected outbound"))
@@ -283,7 +288,7 @@ func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata ad
 }
 
 func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	selected := s.selected.Load()
 	if selected == nil {
 		N.CloseOnHandshakeFailure(conn, onClose, E.New("missing selected outbound"))
