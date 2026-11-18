@@ -163,10 +163,11 @@ func newDownloadEndpoint(ctx context.Context, dialer N.Dialer, serverAddr M.Sock
 		var err error
 		if tlsOptions.Enabled {
 			downloadTLS, err = boxTLS.NewClientWithOptions(boxTLS.ClientOptions{
-				Context:       ctx,
-				Logger:        logger.NOP(),
-				ServerAddress: downloadServer.AddrString(),
-				Options:       tlsOptions,
+				Context:        ctx,
+				Logger:         logger.NOP(),
+				ServerAddress:  downloadServer.AddrString(),
+				Options:        tlsOptions,
+				DomainResolver: settings.DomainResolver,
 			})
 			if err != nil {
 				return nil, err

@@ -132,6 +132,31 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	if remoteConn != nil {
 		remoteAddress = remoteConn.RemoteAddr()
 	}
+	if len(metadata.TCPPrefix) > 0 {
+		writeContext, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+		writeClosed := make(chan struct{})
+		stop := context.AfterFunc(writeContext, func() {
+			remoteConn.Close()
+			close(writeClosed)
+		})
+		var n int
+		n, err = remoteConn.Write(metadata.TCPPrefix)
+		if !stop() {
+			<-writeClosed
+			err = writeContext.Err()
+		}
+		cancel()
+		if err == nil && n < len(metadata.TCPPrefix) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			err = E.Cause(err, "write TCP prefix", formatConnectionDiagnostics(metadata, this, remoteConn, remoteAddress))
+			remoteConn.Close()
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			m.logger.ErrorContext(ctx, err)
+			return
+		}
+	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
 	if err != nil {
 		err = E.Cause(err, "report handshake success")
@@ -238,7 +263,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
 			}
-			err = E.Cause(err, "listen packet connection using ", dialerString)
+			err = E.Cause(err, "listen packet connection", dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return

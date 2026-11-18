@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	_ N.Dialer                = (*resolveDialer)(nil)
-	_ ParallelInterfaceDialer = (*resolveParallelNetworkDialer)(nil)
+	_ ResolveDialer                  = (*resolveDialer)(nil)
+	_ ParallelInterfaceResolveDialer = (*resolveParallelNetworkDialer)(nil)
 )
 
 type ResolveDialer interface {
@@ -29,6 +29,7 @@ type ResolveDialer interface {
 
 type ParallelInterfaceResolveDialer interface {
 	ParallelInterfaceDialer
+	PacketDialerWithDestination
 	QueryOptions() adapter.DNSQueryOptions
 }
 
@@ -131,28 +132,38 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 }
 
 func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	err := d.initialize()
+	conn, destinationAddress, err := d.ListenPacketWithDestination(ctx, destination)
 	if err != nil {
 		return nil, err
+	}
+	if !destinationAddress.IsValid() {
+		return conn, nil
+	}
+	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+}
+
+func (d *resolveDialer) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
+	err := d.initialize()
+	if err != nil {
+		return nil, netip.Addr{}, err
 	}
 	if !destination.IsDomain() {
 		conn, err := d.dialer.ListenPacket(ctx, destination)
 		if err == nil {
 			d.recordServerAddress(destination, destination.Addr)
 		}
-		return conn, err
+		return conn, netip.Addr{}, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
 	if err != nil {
-		return nil, err
+		return nil, netip.Addr{}, err
 	}
 	conn, destinationAddress, err := N.ListenSerial(ctx, d.dialer, destination, addresses)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		d.recordServerAddress(destination, destinationAddress)
 	}
-	d.recordServerAddress(destination, destinationAddress)
-	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+	return conn, destinationAddress, err
 }
 
 func remoteAddressIP(address net.Addr) []byte {

@@ -10,9 +10,13 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	boxTLS "github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
+	"github.com/stretchr/testify/require"
 )
 
 func TestXHTTPOpenStreamReturnsConnectionError(t *testing.T) {
@@ -176,6 +180,28 @@ func TestXHTTPPacketUp(t *testing.T) {
 	if string(response) != "pong" {
 		t.Fatal("unexpected response: ", string(response))
 	}
+}
+
+func TestXHTTPDownloadECHUsesDownloadResolver(t *testing.T) {
+	ctx := service.ContextWithDefaultRegistry(t.Context())
+	service.MustRegister[adapter.DNSTransportManager](ctx, dns.NewTransportManager(dns.NewTransportRegistry(), nil, ""))
+	download := &option.V2RayXHTTPDownloadOptions{TLS: &option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: "download.example",
+		ECH:        &option.OutboundECHOptions{Enabled: true},
+	}}
+	download.DomainResolver = &option.DomainResolveOptions{Server: "download-dns"}
+	client, err := NewClient(ctx, N.SystemDialer, M.ParseSocksaddr("127.0.0.1:443"), option.V2RayXHTTPOptions{
+		Mode:             modePacketUp,
+		DownloadSettings: download,
+	}, nil)
+	require.NoError(t, err)
+	defer client.Close()
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	_, err = boxTLS.ClientHandshake(ctx, conn, client.download.tlsConfig)
+	require.ErrorContains(t, err, "domain resolver not found: download-dns")
 }
 
 func TestXHTTPDownloadSettings(t *testing.T) {

@@ -15941,6 +15941,21 @@
               "minimum": 0,
               "maximum": 4294967295
             },
+            "tcp_prefix": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              ]
+            },
             "udp_disable_domain_unmapping": {
               "type": "boolean"
             },
@@ -16000,6 +16015,21 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 4294967295
+            },
+            "tcp_prefix": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              ]
             },
             "udp_disable_domain_unmapping": {
               "type": "boolean"
@@ -16067,6 +16097,21 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 4294967295
+            },
+            "tcp_prefix": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              ]
             },
             "udp_disable_domain_unmapping": {
               "type": "boolean"

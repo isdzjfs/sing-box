@@ -174,7 +174,14 @@ func (s *Outbound) connect() (*ssh.Client, error) {
 	if len(s.kexAlgorithm) > 0 {
 		config.KeyExchanges = s.kexAlgorithm
 	}
+	// Bound the shared handshake to the service lifetime, independently of any one stream.
+	handshakeCtx, cancel := context.WithTimeout(s.ctx, C.TCPTimeout)
+	stopClose := context.AfterFunc(handshakeCtx, func() { conn.Close() })
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, s.serverAddr.Addr.String(), config)
+	if !stopClose() {
+		err = handshakeCtx.Err()
+	}
+	cancel()
 	if err != nil {
 		conn.Close()
 		return nil, E.Cause(err, "connect to ssh server")

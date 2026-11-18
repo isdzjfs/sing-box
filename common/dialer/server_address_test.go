@@ -1,9 +1,51 @@
 package dialer
 
 import (
+	"context"
 	"net/netip"
 	"testing"
+
+	"github.com/sagernet/sing-box/adapter"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/stretchr/testify/require"
 )
+
+func TestListenPacketWithDestinationRecordsServerAddress(t *testing.T) {
+	ip := netip.MustParseAddr("127.0.0.1")
+	for _, host := range []string{"proxy.example", ip.String()} {
+		t.Run(host, func(t *testing.T) {
+			recorder := NewServerAddressRecorder()
+			resolver := &resolveDialer{
+				dialer:                 N.SystemDialer,
+				router:                 serverAddressTestDNS{ip: ip},
+				serverAddressRecorder:  recorder,
+				serverAddressRecordTag: "proxy",
+			}
+			destination := M.ParseSocksaddrHostPort(host, 443)
+			conn, resolved, err := resolver.ListenPacketWithDestination(t.Context(), destination)
+			require.NoError(t, err)
+			defer conn.Close()
+			if destination.IsDomain() {
+				require.Equal(t, ip, resolved)
+			} else {
+				require.False(t, resolved.IsValid())
+			}
+			recorded, _, found := recorder.last("proxy", host, 443)
+			require.True(t, found)
+			require.Equal(t, ip, recorded)
+		})
+	}
+}
+
+type serverAddressTestDNS struct {
+	adapter.DNSRouter
+	ip netip.Addr
+}
+
+func (r serverAddressTestDNS) Lookup(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error) {
+	return []netip.Addr{r.ip}, nil
+}
 
 func TestServerAddressRecordUsesLatestSuccessfulAddress(t *testing.T) {
 	recorder := NewServerAddressRecorder()

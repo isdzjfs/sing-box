@@ -40,6 +40,8 @@
 - 成员刷新、测速去重、取消和连接代际的保护来自多次本地修复。不能只保留上表新测试而删掉 `protocol/group/urltest_test.go`、`selector_test.go` 中已有测试。
 - UT-03 / UT-05 的补充约束：普通路由连接继续经组拨号，由 `URLTest.DialContext` / `ListenPacket` 根据实际失败的节点和测试 URL 清理可选结果，保留其他 URL 的结果及可见历史。2026-11-02 同步未采用上游 `5372a195b` 在连接管理器中按路由快照叶子清理通用历史的方案，因为本地组拨号已处理真实失败，快照叶子可能在重试期间过期。证据为 `TestRouteDispatchesThroughResolvedGroup`、`TestURLTestRoutedDialFailureInvalidatesOnlyOwnHistoryScope` 及既有拨号切换/重试测试。
 - UT-05 的内部连接边界：`ContextForMultiplexSession` 和 DNS transport 会显式清除外部连接标记；内部连接应随其所属组切换关闭，但不得通过继承的 `ConnectionTracker` 把原始入站连接登记到内部会话的代际。入口为 `adapter/inbound.go`、`dns/client.go`、`common/interrupt/context.go` 和 URLTest 的 `newSelectedConn` / `newSelectedPacketConn`；回归为 `TestURLTestInternalSessionDoesNotRegisterInboundGeneration`。2026-11-02 同步的上游 `0164ce7b8` 与本地入站追踪结合后需此适配；该回归在适配前失败。
+- SSH 复用的会话从服务上下文拨号。单个流取消后，共享握手仍受服务生命周期和 `C.TCPTimeout` 限制。超时连接不能进入会话缓存。入口为 `protocol/ssh/outbound.go`，回归为 `TestSharedSSHHandshakeUsesServiceTimeout`。
+- UDP 解析拨号同时服务路由和节点地址展示。`common/dialer/resolve.go` 的 `ListenPacketWithDestination` 对域名返回实际选中 IP，对 IP 字面量返回空解析地址。两条路径成功时都记录服务器 IP。回归为 `TestListenPacketWithDestinationRecordsServerAddress`。
 - PP-01 / UT-09 的空组边界：接受上游 `c90ccd753` 的重复标签检查，但订阅 URLTest 允许初始成员为空并在运行时填充。回归为 `TestURLTestRejectsDuplicateTagsButAllowsEmptyProviderGroup` 及根目录订阅启动/刷新测试。
 - 上游的 `References()`、选择变化通知、空闲连接管理应与本地修复同时保留。恢复本地旧文件不能连带删掉已经接受的上游功能。
 - 2026-09-23 的上游同步把 `adapter.OutboundGroup` 改为 `Selected(network)` 和 `AttachConnection`，路由在进入连接管理器前解析完整出站链。后续审查发现，把普通 TCP/UDP 连接直接交给该叶子会绕过 `URLTest.DialContext` / `ListenPacket` 的拨号代际校验，且 `Selected` 与 `AttachConnection` 分离时可能把旧叶子登记到新代际。普通连接现仅把解析链用于元数据，实际拨号仍交给顶层组；流转发继续使用解析出的 `FlowOutbound`。`TrackerMetadata` 从 `InboundContext.OutboundChain` 读取路由时快照。继续修改这些入口时，要同时检查冷启动 fallback、刷新竞态、拨号中切换及已路由连接的中断行为。
@@ -60,8 +62,11 @@
 ### 配套边界
 
 - `OBS-01` 跨越 TLS、路由和出站组连接包装。只保留日志格式而丢失实际选中节点追踪不算等价；只保留节点追踪而破坏 UT-01、UT-05 等代际/中断约束也不算等价。
+- `OBS-01` 也覆盖 TCP 前缀写入。前缀须先于已缓存的入站数据发出。失败时，错误保留底层原因、路由组、实际选中节点及拨号时取得的远端地址，日志不得包含前缀内容。入口为 `route/conn.go`，回归为 `TestTCPPrefixPrecedesBufferedPayload` 和 `TestTCPPrefixFailureKeepsSelectedOutboundAndCause`。
+- DNS 动态获取的 ECH 配置按握手取得快照。刷新缓存时，正在进行的 TLS 或 QUIC 握手应继续使用原配置。2026-11-18 同步中，上游 `9d3a1825d` 的 QUIC 路径把可变配置交给了调用方。`common/tls/ech.go` 和 `ech_quic.go` 现从锁内取得副本。`TestECHRefreshKeepsInFlightQUICConfig` 在适配前读到了后一轮的配置，使用 `with_quic` 标签运行。
 - `OBS-02` 的上下文由 DNS 入站、路由和 transport 分层补充。避免在多层重复拼接同一字段，但不能因此退化为只有最外层的通用错误。
 - `XHTTP-01` 是并发关闭与错误传播修复，不是单纯修改日志文案。审查 `OpenStream` 返回值、请求体生命周期、pipe/wait reader、HTTP/2/HTTP/3 客户端或 XMux 清理顺序时，都要运行对应回归测试并核对原始错误是否仍可通过 `errors.Is` 识别。
+- XHTTP 分离下载配置同时指定 TLS 和 `domain_resolver` 时，下载端的 ECH 查询须使用指定的解析器。入口为 `transport/v2rayxhttp/client.go` 的 `newDownloadEndpoint`，回归为 `TestXHTTPDownloadECHUsesDownloadResolver`。
 
 ## 订阅刷新与生命周期行为清单
 
@@ -128,6 +133,12 @@ go test ./common/tls ./route ./dns ./dns/transport/... ./protocol/dns ./service/
 
 ```powershell
 go test -race ./transport/v2rayxhttp ./protocol/group -count=1
+```
+
+涉及动态 ECH、TCP 前缀或共享 SSH 握手时，以下命令可覆盖带 QUIC 的配置快照及对应的连接回归。
+
+```powershell
+go test -race -tags with_quic,with_utls ./common/tls ./common/dialer ./route ./protocol/ssh ./transport/v2rayxhttp -count=1
 ```
 
 接口或依赖有变化时按实际影响扩展到主模块全量测试、`test/` 独立模块编译、Linux/Android 编译。修改 proto 时使用项目生成器重生成，不能手改 protobuf 描述符。

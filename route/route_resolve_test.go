@@ -120,5 +120,9 @@ func (r *resolveTestDNSRouter) LookupReverseMapping(ip netip.Addr) (string, bool
 	return "", false
 }
 
+func (r *resolveTestDNSRouter) LookupECHPublicName(domain string) string {
+	return ""
+}
+
 func (r *resolveTestDNSRouter) ResetNetwork() {
 }
